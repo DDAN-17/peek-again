@@ -373,7 +373,7 @@ impl<'r, T> fmt::Debug for Peek<'r, T>
 impl<'r, T: Iterator> Peek<'r, T> {
     #[inline]
     #[must_use]
-    #[track_caller]
+    #[cfg_attr(debug_assertions, track_caller)]
     fn new(src: &'r mut Peekable<T>) -> Self {
         debug_assert!(
             !src.peeked.is_empty(),
