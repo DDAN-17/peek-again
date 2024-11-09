@@ -2,6 +2,15 @@
 name = "peek-again"
 version = "0.1.0"
 edition = "2021"
+authors = ["Clelland Green <cg@ironvelo.com>"]
+description = "A performant iterator providing double peek functionality."
+repository = "https://github.com/CleveGreen/peek-again"
+documentation = "https://docs.rs/peek_again/latest/peek_again"
+homepage = "https://github.com/CleveGreen/peek-again"
+license = "MIT OR Apache-2.0"
+keywords = ["iterator", "peek", "no_std"]
+categories = ["algorithms", "rust-patterns", "no-std", "no-std::no-alloc"]
+readme = "README.md"
 
 [dev-dependencies]
 criterion = "0.5.1"

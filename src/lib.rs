@@ -711,7 +711,6 @@ impl<T: Iterator> Peekable<T> {
     /// assert!(peekable.peek_state().is_empty());
     /// ```
     #[inline]
-    #[must_use]
     pub const fn peek_state(&self) -> PeekState<'_, T::Item> {
         PeekState::new(&self.peeked)
     }
