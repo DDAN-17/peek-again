@@ -1,0 +1,12 @@
+digraph OnceNextIf {
+    rankdir=LR;
+    node [shape = box];
+
+    Once [label="Once"];
+    Empty [label="Empty"];
+    Func [label="func"];
+
+    Once -> Func;
+    Func -> Once [label="false"];
+    Func -> Empty [label="true"];
+}

@@ -1,0 +1,12 @@
+digraph TwiceNextIf {
+    rankdir=LR;
+    node [shape = box];
+
+    Twice [label="Twice"];
+    Once [label="Once"];
+    Func [label="func"];
+
+    Twice -> Func;
+    Func -> Once [label="true"];
+    Func -> Twice [label="false"];
+}

@@ -1,0 +1,13 @@
+digraph EmptyNextIf {
+    rankdir=LR;
+    node [shape = box];
+
+    Empty [label="Empty"];
+    Once [label="Once"];
+
+    Func [label="func", shape=ellipse];
+
+    Empty -> Func;
+    Func -> Empty [label="true"];
+    Func -> Once [label="false"];
+}
