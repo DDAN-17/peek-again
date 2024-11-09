@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 #![no_std]
 #![no_builtins]
+#![deny(missing_docs)]
 #![doc = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/README.md"))]
 
 extern crate core;
@@ -227,7 +228,9 @@ impl<T> Peeked<T> {
 /// peeked elements, and if the `predicate` evaluated to `true` this would be the case.
 #[must_use = "You must not ignore `drain_if` operation's result"]
 pub enum DrainIf<'r, T: Iterator> {
+    /// The successful result of the `drain_if` operation.
     Drained((Option<T::Item>, T::Item)),
+    /// The original [`Peek`] instance from the unsatisfied `drain_if` operation.
     Peek(Peek<'r, T>)
 }
 
@@ -241,7 +244,7 @@ impl<'r, T: Iterator> DrainIf<'r, T> {
         }
     }
 
-    /// Extract the original [`Peek`] instance from the unsatisfied `drain_if`.
+    /// Extract the original [`Peek`] instance from the unsatisfied `drain_if` operation.
     #[inline]
     pub fn peek(self) -> Option<Peek<'r, T>> {
         match self {
@@ -372,7 +375,7 @@ impl<'r, T: Iterator> Peek<'r, T> {
     #[must_use]
     #[track_caller]
     fn new(src: &'r mut Peekable<T>) -> Self {
-        assert!(
+        debug_assert!(
             !src.peeked.is_empty(),
             "Invariant violated on construction of Peek. Peeked state must not be Empty."
         );
@@ -442,7 +445,6 @@ impl<'r, T: Iterator> Peek<'r, T> {
     /// 
     /// [`peek_2_mut`]: Peekable::peek_2_mut
     /// [`get_mut`]: Peek::get_mut
-
     #[must_use]
     pub fn peek_mut(&mut self) -> Option<&mut T::Item> {
         self.src.transition_forward();
@@ -1398,5 +1400,35 @@ mod tests {
                 None    => prop_assert!(collection.into_iter().find_map(|elem| u8::try_from(elem).ok()).is_none())
             }
         }
+
+        #[test]
+        fn iter_last(collection in any::<Vec<usize>>()) {
+            match Peekable::new(collection.iter()).last() {
+                Some(m) => prop_assert_eq!(m, collection.iter().last().unwrap()),
+                None    => prop_assert!(collection.last().is_none())
+            }
+        }
+
+        #[test]
+        fn iter_last_peeked(collection in any::<Vec<usize>>()) {
+            let mut iter = Peekable::new(collection.iter());
+            let _ = iter.peek();
+
+            match iter.last() {
+                Some(m) => prop_assert_eq!(m, collection.iter().last().unwrap()),
+                None    => prop_assert!(collection.last().is_none())
+            }
+        }
+
+        #[test]
+        fn iter_last_peeked_2(collection in any::<Vec<usize>>()) {
+            let mut iter = Peekable::new(collection.iter());
+            let _ = iter.peek_2();
+
+            match iter.last() {
+                Some(m) => prop_assert_eq!(m, collection.iter().last().unwrap()),
+                None    => prop_assert!(collection.last().is_none())
+            }
+        } 
     }
 }
