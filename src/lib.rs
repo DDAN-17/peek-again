@@ -5,18 +5,9 @@
 #![doc = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/README.md"))]
 
 extern crate core;
-use core::{fmt, mem, iter::Iterator};
+use core::{fmt, mem, iter::{Iterator, DoubleEndedIterator}};
 
-#[repr(transparent)]
-struct Padding<T> { 
-    pad: mem::MaybeUninit<T>,
-}
-
-impl<T> Padding<T> {
-    #[inline(always)]
-    const fn new() -> Self { Self { pad: mem::MaybeUninit::uninit() } }
-}
-
+#[repr(align(16))] 
 enum Peeked<T> {
     Empty,
     // we must track if the result of the peek 
@@ -24,7 +15,7 @@ enum Peeked<T> {
     // be fused. Peeking must not impact standard
     // iteration.
     // 
-    // Padding to keep s elem is same location for 
+    // Padding to keep s elem in same location for 
     // perf improvement in draining of peeked operations.
     // 
     // Prior to this padding, core::iter::Peekable was 
@@ -32,7 +23,24 @@ enum Peeked<T> {
     // (which granted this supports peeking twice), 
     // after padding this implementation performed very 
     // slightly better than core::iter::Peekable.
-    Once((Padding<Option<T>>, Option<T>)),
+    // 
+    // UPDATE: out of nowhere the padding began regressing 
+    // performance. I am unable to explain why without any
+    // changes to the source in question the output assembly
+    // changed in this way. I managed to return this 
+    // implementation to the original performance by adjusting 
+    // the alginment. 
+    // This performance is evaluated on the common case. 
+    // Further benchmarking is warranted.
+    // 
+    // To avoid a massive refactor, switch first elem from 
+    // Padded to zst.
+    // 
+    // Reading the assembly, for some reason the padding 
+    // introduced a new branch in next_if, and change 
+    // in registers. See the analysis directory for 
+    // more information. 
+    Once(((), Option<T>)),
     // Support for the second peek. 
     //      once v     peek 2 v
     Twice((Option<T>, Option<T>))
@@ -88,7 +96,7 @@ impl<T> Peeked<T> {
     #[inline(always)]
     #[must_use]
     const fn once(elem: Option<T>) -> Self {
-        Self::Once((Padding::new(), elem))
+        Self::Once(((), elem))
     }
 
     #[inline(always)]
@@ -104,6 +112,16 @@ impl<T> Peeked<T> {
             Self::Empty    => 0,
             Self::Once(_)  => 1,
             Self::Twice(_) => 2
+        }
+    }
+
+    #[inline]
+    #[must_use]
+    const fn is_term(&self) -> bool {
+        // probably should be matches! 
+        match self {
+            Self::Once((_, None)) | Self::Twice((None, _)) => true,
+            _ => false
         }
     }
 
@@ -885,6 +903,7 @@ impl<T: Iterator> Peekable<T> {
     /// [`peek`]: Peekable::peek
     /// [`consume`]: Peek::consume
     /// [`next`]: Iterator::next
+    #[inline]
     pub fn next_if(&mut self, func: impl FnOnce(&T::Item) -> bool) -> Option<T::Item> {
         match mem::replace(&mut self.peeked, Peeked::Empty) {
             //             true
@@ -1121,6 +1140,8 @@ impl<T: Iterator> Iterator for Peekable<T> {
             Peeked::Once((_, Some(elem))) => if predicate(&elem) { return Some(elem) } else {/* continue */}, 
             
             Peeked::Twice((Some(elem), Some(n_elem))) => if predicate(&elem) {
+                // move n_elem to Once
+                self.peeked = Peeked::once(Some(n_elem));
                 return Some(elem)
             } else if predicate(&n_elem) {
                 return Some(n_elem)
@@ -1151,6 +1172,8 @@ impl<T: Iterator> Iterator for Peekable<T> {
             Peeked::Once((_, Some(elem))) => if let Some(out) = f(elem) { return Some(out) } else {/* continue */}, 
             
             Peeked::Twice((Some(elem), Some(n_elem))) => if let Some(out) = f(elem) {
+                // n_elem -> Once
+                self.peeked = Peeked::once(Some(n_elem));
                 return Some(out)
             } else if let Some(n_out) = f(n_elem) {
                 return Some(n_out)
@@ -1181,6 +1204,8 @@ impl<T: Iterator> Iterator for Peekable<T> {
             Peeked::Once((_, Some(elem))) => if predicate(elem) { return Some(0) } else {/* continue */ 1}, 
 
             Peeked::Twice((Some(elem), Some(n_elem))) => if predicate(elem) {
+                // move n_elem -> Once
+                self.peeked = Peeked::once(Some(n_elem));
                 return Some(0)
             } else if predicate(n_elem) {
                 return Some(1)
@@ -1202,8 +1227,92 @@ impl<T: Iterator> Iterator for Peekable<T> {
     }
 }
 
-// I have some reservations when it comes to implementing DoubleEndedIterator etc. May be implemented.
-// ExactSize, Fused, etc can also be implemented, I will do this later.
+impl<T: DoubleEndedIterator> DoubleEndedIterator for Peekable<T> {
+    #[inline]
+    fn next_back(&mut self) -> Option<Self::Item> {
+        if self.peeked.is_term() { return None; }
+        match self.iter.next_back() {
+            res @ Some(_) => res,
+            // here is a bit complicated than std peekable. As we can peek twice, this means that 
+            // if we have two peeks it should actually be inverted as we are moving backwards..
+            // we need consistent behavior with the underlying iterator. 
+            // 
+            // I think the inversion of operations is sound. Requires testing ofc.
+            None => match self.peeked.drain() {
+                // iter returned none thus we are complete.
+                Peeked::Empty => None,
+                // once this elem is drained we are complete.
+                Peeked::Once((_, elem)) => elem,
+                // Since we are going backwards we will invert our typical op
+                // here, returning second and moving first into once
+                // 
+                // we must ensure second is Some, otherwise we should move directly 
+                // to first, leaving the peeked empty
+                Peeked::Twice((first, second @ Some(_))) => {
+                    self.peeked = Peeked::once(first);
+                    second
+                },
+                Peeked::Twice((first, None)) => first
+            }
+        }
+    }
+
+    #[inline]
+    fn rfold<Acc, Fold>(mut self, init: Acc, mut fold: Fold) -> Acc 
+        where Fold: FnMut(Acc, Self::Item) -> Acc
+    {
+        match self.peeked.drain() {
+            // terminal states
+            Peeked::Once((_, None)) | Peeked::Twice((None, _)) => init,
+            // transparent to underlying iter rfold
+            Peeked::Empty => self.iter.rfold(init, fold),
+            // underlying iter rfold -> peeked elems in reverse order
+            Peeked::Once((_, Some(last))) => {
+                let acc = self.iter.rfold(init, &mut fold);
+                fold(acc, last)
+            },
+            Peeked::Twice((Some(last), Some(s_last))) => {
+                let acc = self.iter.rfold(init, &mut fold);
+                let acc = fold(acc, s_last);
+                fold(acc, last)
+            },
+            // finally, we never touch the underlying iterator and simply call fold
+            Peeked::Twice((Some(last), None)) => fold(init, last)
+        }
+    }
+
+    // again, since we cannot implement try_rfold in stable rust, we'll implement the dependence
+    // of it. Which in this case is only rfind
+    
+    #[inline]
+    fn rfind<P>(&mut self, mut predicate: P) -> Option<Self::Item>
+        where
+            Self: Sized,
+            P: FnMut(&Self::Item) -> bool,
+    {
+        // first, we call the underlying iterator's rfind. If this is not found, 
+        // we check our own elems in reverse order.
+        
+        if let found @ Some(_) = self.iter.rfind(&mut predicate) {
+            return found;
+        }
+
+        // we did not find anything, check peeked in rev order
+        match self.peeked.drain() {
+            // nothing was found
+            Peeked::Empty | Peeked::Once((_, None)) | Peeked::Twice((None, _)) => None,
+            Peeked::Once((_, Some(elem))) => predicate(&elem).then_some(elem),
+            Peeked::Twice((Some(last), Some(s_last))) => if predicate(&s_last) {
+                // move last to Once
+                self.peeked = Peeked::once(Some(last));
+                Some(s_last)
+            } else {
+                predicate(&last).then_some(last)
+            },
+            Peeked::Twice((Some(last), None)) => predicate(&last).then_some(last)
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -1211,6 +1320,30 @@ mod tests {
     use super::*;
     use alloc::{format, vec::Vec};
     use proptest::prelude::*;
+
+    #[test]
+    fn find_map_peek_2_drain() {
+        let collection = [1, 2, 3, 4, 5];
+        let mut iter = Peekable::new(collection.iter());
+        let mut iter_spec = collection.iter();
+        
+        let _ = iter.peek_2();
+
+        assert_eq!(
+            iter.find_map(|elem| u8::try_from(*elem).ok()).unwrap(),
+            iter_spec.find_map(|elem| u8::try_from(*elem).ok()).unwrap()
+        );
+
+        assert_eq!(
+            iter.find_map(|elem| u8::try_from(*elem).ok()).unwrap(),
+            iter_spec.find_map(|elem| u8::try_from(*elem).ok()).unwrap()
+        ); 
+
+        assert_eq!(
+            iter.find_map(|elem| u8::try_from(*elem).ok()).unwrap(),
+            iter_spec.find_map(|elem| u8::try_from(*elem).ok()).unwrap()
+        );
+    }
 
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(50_000))]
@@ -1242,6 +1375,49 @@ mod tests {
             match iter.find(|elem| *elem == &to_find) {
                 Some(elem) => prop_assert_eq!(*elem, to_find),
                 None => prop_assert!(collection.into_iter().find(|elem| elem == &to_find).is_none())
+            }
+        }
+
+        #[test]
+        fn iter_find_many(collection in any::<Vec<u8>>(), to_find in any::<u8>(), times in 0..7usize) {
+            let mut iter = Peekable::new(collection.iter());
+            let mut iter_spec = collection.iter();
+
+            for _ in 0..times {
+                match iter.find(|elem| *elem == &to_find) {
+                    Some(elem) => prop_assert_eq!(elem, iter_spec.find(|elem| *elem == &to_find).unwrap()),
+                    None => prop_assert!(iter_spec.find(|elem| *elem == &to_find).is_none())
+                }
+            }
+        }
+
+        #[test]
+        fn iter_find_many_peeked(collection in any::<Vec<u8>>(), to_find in any::<u8>(), times in 0..7usize) {
+            let mut iter = Peekable::new(collection.iter());
+            let mut iter_spec = collection.iter();
+
+            let _ = iter.peek();
+
+            for _ in 0..times {
+                match iter.find(|elem| *elem == &to_find) {
+                    Some(elem) => prop_assert_eq!(elem, iter_spec.find(|elem| *elem == &to_find).unwrap()),
+                    None => prop_assert!(iter_spec.find(|elem| *elem == &to_find).is_none())
+                }
+            }
+        }
+
+        #[test]
+        fn iter_find_many_peeked_2(collection in any::<Vec<u8>>(), to_find in any::<u8>(), times in 0..7usize) {
+            let mut iter = Peekable::new(collection.iter());
+            let mut iter_spec = collection.iter();
+
+            let _ = iter.peek_2();
+
+            for _ in 0..times {
+                match iter.find(|elem| *elem == &to_find) {
+                    Some(elem) => prop_assert_eq!(elem, iter_spec.find(|elem| *elem == &to_find).unwrap()),
+                    None => prop_assert!(iter_spec.find(|elem| *elem == &to_find).is_none())
+                }
             }
         }
 
@@ -1402,6 +1578,49 @@ mod tests {
         }
 
         #[test]
+        fn iter_find_map_many(collection in any::<Vec<usize>>(), times in 1..7usize) {
+            let mut iter = Peekable::new(collection.iter());
+            let mut iter_spec = collection.iter();
+
+            for _ in 0..times {
+                prop_assert_eq!(
+                    iter.find_map(|elem| u8::try_from(*elem).ok()),
+                    iter_spec.find_map(|elem| u8::try_from(*elem).ok())
+                );
+            }
+        }
+
+        #[test]
+        fn iter_find_map_many_peeked(collection in any::<Vec<usize>>(), times in 1..7usize) {
+            let mut iter = Peekable::new(collection.iter());
+            let mut iter_spec = collection.iter();
+
+            let _ = iter.peek();
+
+            for _ in 0..times {
+                prop_assert_eq!(
+                    iter.find_map(|elem| u8::try_from(*elem).ok()),
+                    iter_spec.find_map(|elem| u8::try_from(*elem).ok())
+                );
+            }
+        }
+
+        #[test]
+        fn iter_find_map_many_peeked_2(collection in any::<Vec<usize>>(), times in 1..16usize) {
+            let mut iter = Peekable::new(collection.iter());
+            let mut iter_spec = collection.iter();
+
+            let _ = iter.peek_2();
+
+            for _ in 0..times {
+                prop_assert_eq!(
+                    iter.find_map(|elem| u16::try_from(*elem).ok()),
+                    iter_spec.find_map(|elem| u16::try_from(*elem).ok())
+                );
+            }
+        }
+
+        #[test]
         fn iter_last(collection in any::<Vec<usize>>()) {
             match Peekable::new(collection.iter()).last() {
                 Some(m) => prop_assert_eq!(m, collection.iter().last().unwrap()),
@@ -1429,6 +1648,122 @@ mod tests {
                 Some(m) => prop_assert_eq!(m, collection.iter().last().unwrap()),
                 None    => prop_assert!(collection.last().is_none())
             }
-        } 
+        }
+
+        #[test]
+        fn iter_next_back(collection in any::<Vec<usize>>(), extra_iters in 1..7usize) {
+            let mut iter = Peekable::new(collection.iter());
+            let mut iter_spec = collection.iter();
+
+            loop {
+                let res = iter.next_back();
+                let s_res = iter_spec.next_back();
+                prop_assert_eq!(res, s_res);
+
+                if res.is_none() { break; }
+            }
+
+            for _ in 0..extra_iters {
+                prop_assert_eq!(iter.next_back(), iter_spec.next_back());
+            }
+        }
+
+        #[test]
+        fn iter_next_back_peeked(collection in any::<Vec<usize>>(), extra_iters in 1..7usize) {
+            let mut iter = Peekable::new(collection.iter());
+            let mut iter_spec = collection.iter();
+            
+            let _ = iter.peek();
+
+            loop {
+                let res = iter.next_back();
+                let s_res = iter_spec.next_back();
+                prop_assert_eq!(res, s_res);
+
+                if res.is_none() { break; }
+            }
+
+            for _ in 0..extra_iters {
+                prop_assert_eq!(iter.next_back(), iter_spec.next_back(), "Extra iters failure.");
+            }
+        }
+
+        #[test]
+        fn iter_next_back_peeked_2(collection in any::<Vec<usize>>(), extra_iters in 1..7usize) {
+            let mut iter = Peekable::new(collection.iter());
+            let mut iter_spec = collection.iter();
+            
+            let _ = iter.peek_2();
+
+            loop {
+                let res = iter.next_back();
+                let s_res = iter_spec.next_back();
+                prop_assert_eq!(res, s_res);
+
+                if res.is_none() { break; }
+            }
+
+            for _ in 0..extra_iters {
+                prop_assert_eq!(iter.next_back(), iter_spec.next_back(), "Extra iters failure.");
+            }
+        }
+
+        #[test]
+        fn iter_rfind(collection in any::<Vec<usize>>(), extra_iters in 1..7usize) {
+            let mut iter = Peekable::new(collection.iter());
+            let mut iter_spec = collection.iter();
+
+            loop {
+                let res = iter.rfind(|x| *x == &0);
+                let s_res = iter_spec.rfind(|x| *x == &0);
+                prop_assert_eq!(res, s_res);
+
+                if res.is_none() { break; }
+            }
+
+            for _ in 0..extra_iters {
+                prop_assert_eq!(iter.rfind(|x| *x == &0), iter_spec.rfind(|x| *x == &0), "Extra iters failure.");
+            }
+        }
+
+        #[test]
+        fn iter_rfind_peeked(collection in any::<Vec<usize>>(), extra_iters in 1..7usize) {
+            let mut iter = Peekable::new(collection.iter());
+            let mut iter_spec = collection.iter();
+
+            let _ = iter.peek();
+
+            loop {
+                let res = iter.rfind(|x| *x == &0);
+                let s_res = iter_spec.rfind(|x| *x == &0);
+                prop_assert_eq!(res, s_res);
+
+                if res.is_none() { break; }
+            }
+
+            for _ in 0..extra_iters {
+                prop_assert_eq!(iter.rfind(|x| *x == &0), iter_spec.rfind(|x| *x == &0), "Extra iters failure.");
+            }
+        }
+
+        #[test]
+        fn iter_rfind_peeked_2(collection in any::<Vec<usize>>(), extra_iters in 1..7usize) {
+            let mut iter = Peekable::new(collection.iter());
+            let mut iter_spec = collection.iter();
+
+            let _ = iter.peek_2();
+
+            loop {
+                let res = iter.rfind(|x| *x == &0);
+                let s_res = iter_spec.rfind(|x| *x == &0);
+                prop_assert_eq!(res, s_res);
+
+                if res.is_none() { break; }
+            }
+
+            for _ in 0..extra_iters {
+                prop_assert_eq!(iter.rfind(|x| *x == &0), iter_spec.rfind(|x| *x == &0), "Extra iters failure.");
+            }
+        }
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "peek-again"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 authors = ["Clelland Green <cg@ironvelo.com>"]
 description = "A performant iterator providing double peek functionality."
@@ -26,6 +26,10 @@ harness = false
 
 [[bench]]
 name = "peek_2"
+harness = false
+
+[[bench]]
+name = "pipeline_bubble"
 harness = false
 
 [package.metadata.docs.rs]
