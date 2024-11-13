@@ -1,6 +1,6 @@
 [package]
 name = "peek-again"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2021"
 authors = ["Clelland Green <cg@ironvelo.com>"]
 description = "A performant iterator providing double peek functionality."
@@ -12,16 +12,29 @@ keywords = ["iterator", "peek", "no_std"]
 categories = ["algorithms", "rust-patterns", "no-std", "no-std::no-alloc"]
 readme = "README.md"
 
+[features]
+allow-unsafe = []
+
 [dev-dependencies]
 criterion = "0.5.1"
 proptest = "1.5.0"
 
 [profile.release]
 lto = true
-opt-level=3
+opt-level = 3
+
+[profile.bench]
+lto = true
+opt-level = 3
+debug = true
+debug-assertions = false
 
 [[bench]]
 name = "vs_std"
+harness = false
+
+[[bench]]
+name = "next_if"
 harness = false
 
 [[bench]]
@@ -32,7 +45,14 @@ harness = false
 name = "pipeline_bubble"
 harness = false
 
+[[bench]]
+name = "peek"
+harness = false
+
 [package.metadata.docs.rs]
 all-features = true
 targets = ["x86_64-unknown-linux-gnu"]
 rustdoc-args = ["--cfg", "docsrs", "--generate-link-to-definition"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }

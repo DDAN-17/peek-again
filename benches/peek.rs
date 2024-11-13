@@ -19,20 +19,6 @@ fn benchmark(c: &mut Criterion) {
     let mut std   = inner.peekable();
     let mut again = Peekable::new(inner);
 
-    c.bench_function("std-next", |b| {
-        b.iter(|| {
-            let res = std.next().unwrap();
-            assert_eq!(black_box(res), 1);
-        })
-    });
-
-    c.bench_function("again-next", |b| {
-        b.iter(|| {
-            let res = again.next().unwrap();
-            assert_eq!(black_box(res), 1);
-        })
-    });
-
     c.bench_function("std-peek", |b| {
         b.iter(|| {
             let res = std.peek();
@@ -46,21 +32,8 @@ fn benchmark(c: &mut Criterion) {
             assert_eq!(black_box(res), Some(&1));
         })
     });
-
-    c.bench_function("std-next-if", |b| {
-        b.iter(|| {
-            let res = std.next_if(|item| item == &1).unwrap();
-            assert_eq!(black_box(res), 1);
-        })
-    });
-
-    c.bench_function("again-next-if", |b| {
-        b.iter(|| {
-            let res = again.next_if(|item| item == &1).unwrap();
-            assert_eq!(black_box(res), 1);
-        })
-    });
 }
 
 criterion_group!(benches, benchmark);
 criterion_main!(benches);
+

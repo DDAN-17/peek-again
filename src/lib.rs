@@ -1,81 +1,47 @@
-#![forbid(unsafe_code)]
+#![cfg_attr(not(feature = "allow-unsafe"), forbid(unsafe_code))]
 #![no_std]
 #![no_builtins]
 #![deny(missing_docs)]
 #![doc = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/README.md"))]
 
 extern crate core;
-use core::{fmt, mem, iter::{Iterator, DoubleEndedIterator}};
+use core::{fmt, mem, iter::{Iterator, DoubleEndedIterator, ExactSizeIterator, FusedIterator}};
+
+#[cfg(kani)]
+use kani::invariant::Invariant;
+
+#[cfg(kani)]
+macro_rules! requires {
+    ($cond:expr $(, $msg:literal)?) => {
+        kani::assert($cond, requires!(@msg $cond $(, $msg)?))
+    };
+    (@msg $cond:expr, $msg:literal) => {
+        $msg
+    };
+    (@msg $cond:expr) => {
+        stringify!($cond)
+    };
+}
+
+#[cfg(not(kani))]
+macro_rules! requires {
+    ($cond:expr $(, $msg:literal)?) => {
+        debug_assert!($cond $(, $msg)?)
+    };
+}
+
+#[cfg(kani)]
+macro_rules! bicond {
+    (($l:expr) <=> ($r:expr)) => {
+        kani::implies!($l => $r) && kani::implies!($r => $l)
+    }
+}
 
 #[repr(align(16))] 
+#[repr(u8)]
 enum Peeked<T> {
     Empty,
-    // we must track if the result of the peek 
-    // is None as the underlying iterator may not 
-    // be fused. Peeking must not impact standard
-    // iteration.
-    // 
-    // Padding to keep s elem in same location for 
-    // perf improvement in draining of peeked operations.
-    // 
-    // Prior to this padding, core::iter::Peekable was 
-    // performing 33% better than this implementation 
-    // (which granted this supports peeking twice), 
-    // after padding this implementation performed very 
-    // slightly better than core::iter::Peekable.
-    // 
-    // UPDATE: out of nowhere the padding began regressing 
-    // performance. I am unable to explain why without any
-    // changes to the source in question the output assembly
-    // changed in this way. I managed to return this 
-    // implementation to the original performance by adjusting 
-    // the alginment. 
-    // This performance is evaluated on the common case. 
-    // Further benchmarking is warranted.
-    // 
-    // To avoid a massive refactor, switch first elem from 
-    // Padded to zst.
-    // 
-    // Reading the assembly, for some reason the padding 
-    // introduced a new branch in next_if, and change 
-    // in registers. See the analysis directory for 
-    // more information. 
-    Once(((), Option<T>)),
-    // Support for the second peek. 
-    //      once v     peek 2 v
-    Twice((Option<T>, Option<T>))
-    // By padding Once, draining the peeked operations
-    // became significantly more straight forward. 
-    // 
-    // Once value returned first, and peek 2 value 
-    // transitioned to Once value. With padding peek 2
-    // going to Once can be a simple updating of the 
-    // descriminator.
-}
-
-macro_rules! matched {
-    (
-        $peeked:expr => {
-            empty => $empty:expr,
-            once $ov:ident => $once:expr,
-            twice $fv:ident $sv:ident => $twice:expr $(,)?
-        }
-    ) => {
-        match $peeked {
-            Peeked::Empty => $empty,
-            Peeked::Once((_, $ov)) => $once,
-            Peeked::Twice(($fv, $sv)) => $twice
-        }
-    }
-}
-
-macro_rules! on_left {
-    ($peeked:expr => { $elem:ident => $do:expr, else => $else:expr $(,)? }) => {
-        match $peeked {
-            Peeked::Once((_, $elem)) | Peeked::Twice(($elem, _)) => $do,
-            _ => $else
-        }
-    }
+    Peeked((Option<T>, Option<Option<T>>))
 }
 
 macro_rules! is_some_and {
@@ -96,22 +62,22 @@ impl<T> Peeked<T> {
     #[inline(always)]
     #[must_use]
     const fn once(elem: Option<T>) -> Self {
-        Self::Once(((), elem))
+        Self::Peeked((elem, None))
     }
 
     #[inline(always)]
     #[must_use]
     const fn twice(first: Option<T>, second: Option<T>) -> Self {
-        Self::Twice((first, second))
+        Self::Peeked((first, Some(second)))
     }
 
     #[inline]
     #[must_use]
     const fn num_peeked(&self) -> u8 {
         match self {
-            Self::Empty    => 0,
-            Self::Once(_)  => 1,
-            Self::Twice(_) => 2
+            Self::Empty                => 0,
+            Self::Peeked((_, None))    => 1,
+            Self::Peeked((_, Some(_))) => 2
         }
     }
 
@@ -120,7 +86,7 @@ impl<T> Peeked<T> {
     const fn is_term(&self) -> bool {
         // probably should be matches! 
         match self {
-            Self::Once((_, None)) | Self::Twice((None, _)) => true,
+            Self::Peeked((None, _)) => true,
             _ => false
         }
     }
@@ -130,18 +96,18 @@ impl<T> Peeked<T> {
     const fn maybe_term(&self) -> MaybeTerm {
         match self {
             // terminal, known size
-            Self::Once((_, None)) | Self::Twice((None, _)) => MaybeTerm::Size(0),
-            Self::Twice((Some(_), None))    => MaybeTerm::Size(1),
+            Self::Peeked((Some(_), Some(None))) => MaybeTerm::Size(1),  
+            Self::Peeked((None, _))             => MaybeTerm::Size(0),
             // non terminal, add
-            Self::Twice((Some(_), Some(_))) => MaybeTerm::Add(2),
-            Self::Once((_, Some(_)))        => MaybeTerm::Add(1),
-            Self::Empty                     => MaybeTerm::Add(0)
+            Self::Peeked((Some(_), Some(Some(_)))) => MaybeTerm::Add(2),
+            Self::Peeked((Some(_), None))          => MaybeTerm::Add(1),
+            Self::Empty                            => MaybeTerm::Add(0)
         }
     }
 
-    #[inline]
+    #[inline(always)]
     #[must_use]
-    fn take(&mut self) -> Option<Option<T>> {
+    fn take_inner(&mut self) -> Option<Option<T>> {
         // empty -> once -> twice (once, new)
         //      peek    peek 
         // 
@@ -150,48 +116,50 @@ impl<T> Peeked<T> {
         //        ret                 ret     None
         // twice (once, new) -> once (new) -> empty
         //                  take          take
-        matched! { mem::replace(self, Self::Empty) => {
-            empty     => None,
-            once p    => Some(p),
-            twice f s => { *self = Self::once(s); Some(f) }
-        } }
+        match self {
+            Self::Empty => None,
+            Self::Peeked((elem, None)) => {
+                let res = elem.take();
+                *self = Peeked::Empty;
+                Some(res)
+            }
+            Self::Peeked((elem, Some(next))) => {
+                let res = elem.take();
+                *self = Peeked::once(next.take());
+                Some(res)
+            }
+        }
+    }
+
+    #[inline]
+    #[must_use]
+    #[cfg(not(kani))]
+    fn take(&mut self) -> Option<Option<T>> {
+        self.take_inner()
+    }
+
+    #[inline]
+    #[must_use]
+    #[cfg(kani)]
+    pub fn take(&mut self) -> Option<Option<T>> {
+        let num_peeked = self.num_peeked();
+        let res = self.take_inner();
+        let post_num_peeked = self.num_peeked();
+        
+        kani::assert(
+            bicond!((num_peeked == 2) <=> (post_num_peeked == 1))   &&
+            kani::implies!(num_peeked == 0 => post_num_peeked == 0) &&
+            kani::implies!(num_peeked == 1 => post_num_peeked == 0) &&
+            bicond!((num_peeked != 0) <=> (res.is_some())),
+            "`take` always approaches `Empty`"
+        );
+
+        res
     }
 
     #[inline(always)]
     #[must_use]
-    fn drain(&mut self) -> Peeked<T> {
-        mem::replace(self, Self::Empty)
-    }
-
-    // whenever a new caller peeks, it should not reference
-    // double peek, and simply be the following state of the
-    // iterator. This will return Once's element or Twice's first
-    // element.
-    #[inline]
-    #[must_use]
-    const fn init_peek(&self) -> Option<&T> {
-        matched! { self => {
-            empty              => None,
-            once elem          => elem.as_ref(),
-            twice elem _ignore => elem.as_ref()
-        } }
-    }
-
-    #[inline]
-    #[must_use]
-    fn init_peek_mut(&mut self) -> Option<&mut T> {
-        matched! { self => {
-            empty              => None,
-            once elem          => elem.as_mut(),
-            twice elem _ignore => elem.as_mut()
-        } }
-    }
-
-    #[inline]
-    #[must_use]
-    fn has_first_and<P>(&self, and: P) -> bool where P: FnOnce(&Option<T>) -> bool {
-        on_left!(self => { elem => and(elem), else => false })
-    }
+    fn drain(&mut self) -> Self { mem::replace(self, Self::Empty) }
 
     /// Returns `true` if the `Peekable` is two steps ahead of the underlying iterator (the 
     /// maximum lookahead). 
@@ -201,7 +169,7 @@ impl<T> Peeked<T> {
     #[inline]
     #[must_use]   
     const fn is_full(&self) -> bool {
-        matches!(self, Self::Twice(_))
+        matches!(self, Self::Peeked((_, Some(_))))
     }
 
     /// Returns `true` if the `Peekable` is at least one step ahead of the underlying iterator.
@@ -215,7 +183,7 @@ impl<T> Peeked<T> {
     #[inline]
     #[must_use]
     const fn only_one(&self) -> bool {
-        matches!(self, Self::Once(_))
+        matches!(self, Self::Peeked((_, None)))
     }
 
     /// Returns `true` if the `Peekable` is not ahead of the underlying iterator.
@@ -228,9 +196,9 @@ impl<T> Peeked<T> {
     /// Precondition:  The Peeked state must be Empty.
     /// Postcondition: The Peeked state will be Once.
     #[inline]
-    #[cfg_attr(debug_assertions, track_caller)]
+    #[cfg_attr(all(debug_assertions, not(kani)), track_caller)]
     fn add_first_peek(&mut self, elem: Option<T>) {
-        debug_assert!(
+        requires!(
             self.is_empty(), 
             "Precondition violated: `add_first_peek` was called when state was not Empty."
         );
@@ -368,13 +336,24 @@ pub struct Peek<'r, T: Iterator> {
     src: &'r mut Peekable<T>
 }
 
+#[cfg(kani)]
+impl<'r, T: Iterator> Invariant for Peek<'r, T> {
+    #[inline]
+    fn is_safe(&self) -> bool {
+        self.src.peeked.non_empty()
+    }
+}
+
 impl<'r, T> PartialEq<Option<&T::Item>> for Peek<'r, T> 
     where
         T: Iterator,
         <T as Iterator>::Item: PartialEq
 {
-    #[inline]
-    fn eq(&self, other: &Option<&T::Item>) -> bool { self.src.peeked.has_first_and(|data| data.as_ref().eq(other)) }
+    // originally was inline, when changing to inline(always) perf 2x'd
+    #[inline(always)]
+    fn eq(&self, other: &Option<&T::Item>) -> bool { 
+        self.get().eq(other)
+    }
 }
 
 impl<'r, T> fmt::Debug for Peek<'r, T> 
@@ -391,25 +370,89 @@ impl<'r, T> fmt::Debug for Peek<'r, T>
 impl<'r, T: Iterator> Peek<'r, T> {
     #[inline]
     #[must_use]
-    #[cfg_attr(debug_assertions, track_caller)]
+    #[cfg_attr(all(debug_assertions, not(kani)), track_caller)]
     fn new(src: &'r mut Peekable<T>) -> Self {
-        debug_assert!(
+        requires!(
             !src.peeked.is_empty(),
             "Invariant violated on construction of Peek. Peeked state must not be Empty."
         );
         Self { src }
     }
 
+    #[inline(always)]
+    #[cfg(feature = "allow-unsafe")]
+    const fn get_impl(&self) -> Option<&T::Item> {
+        // SAFETY
+        // 
+        // The checked invariant (by kani) is that for the existence of `Peek` the 
+        // Peeked state must not be empty. This is a guarantee, not an assumption.
+        // 
+        // `Peek` internally holds a mutable reference to the `Peekable` type, 
+        // thus statically ensuring mutual exclusion, so beyond the guarantees by
+        // kani, this invariant being violated in safe rust is not plausible.
+        // 
+        // This does yield a 22% performance improvement, though these optimizations
+        // are feature gated for safety pedants.
+        match &self.src.peeked {
+            Peeked::Peeked((elem, _)) => elem.as_ref(),
+            Peeked::Empty             => unsafe { core::hint::unreachable_unchecked() }
+        }
+    }
+
+    #[inline(always)]
+    #[cfg(not(feature = "allow-unsafe"))]
+    const fn get_impl(&self) -> Option<&T::Item> {
+        match &self.src.peeked {
+            Peeked::Peeked((elem, _)) => elem.as_ref(),
+            Peeked::Empty             => None
+        }
+    }
+
     /// Get a reference to the underlying peeked element.
     #[inline]
+    #[cfg(not(kani))]
     pub const fn get(&self) -> Option<&T::Item> {
-        self.src.peeked.init_peek()
+        self.get_impl()
+    }
+
+    #[inline]
+    #[cfg(kani)]
+    pub fn get(&self) -> Option<&T::Item> {
+        kani::assert(self.is_safe(), "`Peek` invariant violated, state must be non-empty`");
+        self.get_impl()
+    }
+
+    #[inline(always)]
+    #[cfg(feature = "allow-unsafe")]
+    fn get_mut_impl(&mut self) -> Option<&mut T::Item> {
+        // SAFETY
+        // 
+        // The checked invariant (by kani) is that for the existence of `Peek` the 
+        // Peeked state must not be empty. This is a guarantee, not an assumption.
+        // 
+        // `Peek` internally holds a mutable reference to the `Peekable` type, 
+        // thus statically ensuring mutual exclusion, so beyond the guarantees by
+        // kani, this invariant being violated in safe rust is not plausible.
+        match &mut self.src.peeked {
+            Peeked::Peeked((elem, _)) => elem.as_mut(),
+            Peeked::Empty             => unsafe { core::hint::unreachable_unchecked() }
+        }
+    }
+
+    #[inline(always)]
+    #[cfg(not(feature = "allow-unsafe"))]
+    fn get_mut_impl(&mut self) -> Option<&mut T::Item> {
+        match &mut self.src.peeked {
+            Peeked::Peeked((elem, _)) => elem.as_mut(),
+            Peeked::Empty             => None
+        }
     }
 
     /// Get a mutable reference to the underlying peeked element.
     #[inline]
     pub fn get_mut(&mut self) -> Option<&mut T::Item> {
-        self.src.peeked.init_peek_mut()
+        #[cfg(kani)] { kani::assert(self.is_safe(), "`Peek` invariant violated, state must be non-empty`"); }
+        self.get_mut_impl()
     }
 
     /// Get a reference to the element following what is currently peeked.
@@ -435,9 +478,18 @@ impl<'r, T: Iterator> Peek<'r, T> {
     /// [`get`]: Peek::get
     #[must_use]
     pub fn peek(&mut self) -> Option<&T::Item> {
+        #[cfg(kani)] { kani::assert(self.is_safe(), "`Peek` invariant violated, state must be non-empty`"); }
         self.src.transition_forward();
+
+        #[cfg(kani)] {
+            kani::assert(
+                self.src.peeked.is_full(), 
+                "`transition_forward` postcondition /\\ Peek's invariant -> is_full"
+            );
+        }
+
         match &self.src.peeked {
-            Peeked::Twice((_, elem)) => elem.as_ref(),
+            Peeked::Peeked((_, Some(elem))) => elem.as_ref(),
             // postcondition of transition_forward
             _ => unreachable!()
         }
@@ -465,18 +517,46 @@ impl<'r, T: Iterator> Peek<'r, T> {
     /// [`get_mut`]: Peek::get_mut
     #[must_use]
     pub fn peek_mut(&mut self) -> Option<&mut T::Item> {
+        #[cfg(kani)] { kani::assert(self.is_safe(), "`Peek` invariant violated, state must be non-empty`"); }
         self.src.transition_forward();
+        
+        #[cfg(kani)] {
+            kani::assert(
+                self.src.peeked.is_full(), 
+                "`transition_forward` postcondition /\\ Peek's invariant -> is_full"
+            );
+        }
+
         match &mut self.src.peeked {
-            Peeked::Twice((_, elem)) => elem.as_mut(),
+            Peeked::Peeked((_, Some(elem))) => elem.as_mut(),
             // postcondition of transition_forward
             _ => unreachable!()
         }
+    }
+
+    #[inline(always)]
+    #[cfg(feature = "allow-unsafe")]
+    fn consume_impl(self) -> Option<T::Item> {
+        unsafe { 
+            self.src.peeked
+                .take()
+                .unwrap_unchecked(/* Peek's invariant guarantees unreachable */)
+        }
+    }
+
+    #[inline(always)]
+    #[cfg(not(feature = "allow-unsafe"))]
+    fn consume_impl(self) -> Option<T::Item> {
+        self.src.peeked.take().unwrap(/* Peek's invariant guarantees infallible */)
     }
 
     /// Advance the iterator, taking ownership of the underlying peeked element.
     /// 
     /// This should be used similarly to [`next_if`], otherwise it is simply
     /// a less efficient mode of calling [`next`].
+    /// 
+    /// Under certain patterns, plus `allow-unsafe` being enabled, this will 
+    /// outperform [`next_if`]. See `benches/next_if.rs` for an example of this.
     /// 
     /// # Example
     /// 
@@ -499,9 +579,8 @@ impl<'r, T: Iterator> Peek<'r, T> {
     /// [`next`]: Peekable::next
     #[inline]
     pub fn consume(self) -> Option<T::Item> {
-        self.src.peeked
-            .take()
-            .unwrap(/* Peek cannot exist unless there is at least one peeked element */)
+        #[cfg(kani)] { kani::assert(self.is_safe(), "`Peek` invariant violated, state must be non-empty`"); }
+        self.consume_impl()
     }
 
     /// Drain the peeked elements if `predicate` returns `true`.
@@ -543,9 +622,18 @@ impl<'r, T: Iterator> Peek<'r, T> {
     pub fn drain_if<F>(self, predicate: F) -> DrainIf<'r, T> 
         where F: FnOnce(&T::Item) -> bool
     {
+        #[cfg(kani)] { kani::assert(self.is_safe(), "`Peek` invariant violated, state must be non-empty`"); }
         self.src.transition_forward();
+        
+        #[cfg(kani)] {
+            kani::assert(
+                self.src.peeked.is_full(), 
+                "`transition_forward` postcondition /\\ Peek's invariant -> is_full"
+            );
+        }
+
         match mem::replace(&mut self.src.peeked, Peeked::Empty) {
-            Peeked::Twice((first, second)) => match second {
+            Peeked::Peeked((first, Some(second))) => match second {
                 Some(second) if predicate(&second) => DrainIf::Drained((first, second)),
                 _ => {
                     self.src.peeked = Peeked::twice(first, second);
@@ -739,27 +827,45 @@ impl<T: Iterator> Peekable<T> {
     /// Postcondition: Peeked state will always be `Twice`.
     #[inline]
     fn transition_forward(&mut self) {
+        #[cfg(kani)]
+        let num_peeked = self.peeked.num_peeked();
+
         // since we are only to be used in a peek, the state of peeked must not be empty. 
         // We are either transitioning to twice, or returning the final twice element. 
-        self.peeked = match mem::replace(&mut self.peeked, Peeked::Empty) {
-            twice @ Peeked::Twice(_) => twice,
-            Peeked::Once((_, elem))  => Peeked::Twice((elem, self.iter.next())),
-            // precondition
-            Peeked::Empty            => unreachable!()
-        }; 
+
+        match &mut self.peeked {
+            Peeked::Peeked((_, sec @ None)) => {*sec = Some(self.iter.next())},
+            _ => {}
+        }
+
+        #[cfg(kani)] {
+            let post_num_peeked = self.peeked.num_peeked();
+            kani::assert(
+                bicond!((num_peeked == 0) <=> (post_num_peeked == 1))   &&
+                kani::implies!(num_peeked == 1 => post_num_peeked == 2) &&
+                kani::implies!(num_peeked == 2 => post_num_peeked == 2),
+                "`transition_forward` always approaches `Twice`"
+            );
+        }
     }
 
     /// Postcondition: Peeked state will always be `Twice`.
     fn fill(&mut self) {
-        self.peeked = match mem::replace(&mut self.peeked, Peeked::Empty) {
-            twice @ Peeked::Twice(_) => twice,
-            Peeked::Once((_, elem))  => Peeked::twice(elem, self.iter.next()),
-            Peeked::Empty            => {
-                let first  = self.iter.next();
-                let second = self.iter.next();
-                Peeked::twice(first, second)
-            }
-        }; 
+        match &mut self.peeked {
+            // fill up
+            Peeked::Empty => { self.peeked = Peeked::twice(self.iter.next(), self.iter.next()); },
+            // full
+            Peeked::Peeked((_, Some(_))) => {},
+            // add one
+            Peeked::Peeked((_, sec @ None)) => { *sec = Some(self.iter.next()); }
+        }
+
+        #[cfg(kani)] {
+            kani::assert(
+                self.peeked.is_full(),
+                "Fill postcondition not satisfied. Peek state not `Twice`"
+            );
+        }
     }
 
     /// Returns a reference to the `next()` value without advancing the iterator.
@@ -834,7 +940,7 @@ impl<T: Iterator> Peekable<T> {
     pub fn peek_2(&mut self) -> Option<&T::Item> {
         self.fill();
         match &self.peeked {
-            Peeked::Twice((_, second)) => second.as_ref(),
+            Peeked::Peeked((_, Some(second))) => second.as_ref(),
             // fill postcondition
             _ => unreachable!()
         }
@@ -868,7 +974,7 @@ impl<T: Iterator> Peekable<T> {
     pub fn peek_2_mut(&mut self) -> Option<&mut T::Item> {
         self.fill();
         match &mut self.peeked {
-            Peeked::Twice((_, second)) => second.as_mut(),
+            Peeked::Peeked((_, Some(second))) => second.as_mut(),
             // fill postcondition
             _ => unreachable!()
         } 
@@ -905,46 +1011,39 @@ impl<T: Iterator> Peekable<T> {
     /// [`next`]: Iterator::next
     #[inline]
     pub fn next_if(&mut self, func: impl FnOnce(&T::Item) -> bool) -> Option<T::Item> {
-        match mem::replace(&mut self.peeked, Peeked::Empty) {
+        match &mut self.peeked {
             //             true
             //      +-----------------+
             //      v                 |
             //    +-------+         +------+  false   +------+
             //    | Empty | ------> | func | -------> | Once |
             //    +-------+         +------+          +------+
-            Peeked::Empty => {
-                let next = self.iter.next();
-
-                if is_some_and!(next, func) {
-                    next
-                } else {
-                    self.peeked = Peeked::once(next);
-                    None
-                }
+            Peeked::Empty => match self.iter.next() {
+                Some(next) if func(&next) => Some(next),
+                other => { self.peeked = Peeked::once(other); None } 
             },
-            //             false
+            //             false                                
             //      +-----------------+
             //      v                 |
             //    +------+          +------+  true   +-------+
             //    | Once | -------> | func | ------> | Empty |
             //    +------+          +------+         +-------+
-            Peeked::Once((_, elem)) => if is_some_and!(elem, func) {
-                elem
+            Peeked::Peeked((first, None)) => if is_some_and!(first, func) {
+                let res = first.take();
+                self.peeked = Peeked::Empty;
+                res
             } else {
-                self.peeked = Peeked::once(elem);
                 None
             },
-            //              false
-            //       +------------------+
-            //       v                  |
-            //     +-------+          +------+  true   +------+
-            //     | Twice | -------> | func | ------> | Once |
-            //     +-------+          +------+         +------+
-            Peeked::Twice((elem, later)) => if is_some_and!(elem, func) {
-                self.peeked = Peeked::once(later);
-                elem
+            //             false                               
+            //      +------------------+
+            //      v                  |
+            //    +-------+          +------+  true   +------+
+            //    | Twice | -------> | func | ------> | Once |
+            //    +-------+          +------+         +------+
+            Peeked::Peeked((first, Some(second))) => if is_some_and!(first, func) {
+                mem::replace(first, second.take())
             } else {
-                self.peeked = Peeked::twice(elem, later);
                 None
             }
         }
@@ -1006,13 +1105,13 @@ impl<T: Iterator> Iterator for Peekable<T> {
     #[inline]
     fn count(self) -> usize {
         let amount = match self.peeked {
-            Peeked::Empty                  => 0,
-            Peeked::Once ((_, Some(_)))    => 1,
-            Peeked::Twice((Some(_), next)) => match next {
+            Peeked::Empty                         => 0,
+            Peeked::Peeked((None, _))             => return 0,
+            Peeked::Peeked((Some(_), None))       => 1,
+            Peeked::Peeked((Some(_), Some(next))) => match next {
                 Some(_) => 2,
-                None    => 1
+                None    => return 1
             },
-            _ => return 0
         };
 
         amount + self.iter.count()
@@ -1024,12 +1123,12 @@ impl<T: Iterator> Iterator for Peekable<T> {
             self.peeked.take().unwrap_or_else(|| self.iter.next())
         } else {
             match self.peeked.drain() {
-                Peeked::Twice((_, elem)) => if n == 1 {
+                Peeked::Peeked((_, Some(elem))) => if n == 1 {
                     elem
                 } else {
                     self.iter.nth(n - 2)
-                },
-                Peeked::Once(_) => self.iter.nth(n - 1),
+                }, 
+                Peeked::Peeked((_, None)) => self.iter.nth(n - 1),
                 Peeked::Empty => self.iter.nth(n)
             }
         }
@@ -1039,14 +1138,15 @@ impl<T: Iterator> Iterator for Peekable<T> {
     fn last(mut self) -> Option<T::Item> {
         match self.peeked.drain() {
             Peeked::Empty => self.iter.last(),
-            // first element none -> none 
-            Peeked::Once((_, None)) | Peeked::Twice((None, _)) => None,
-            // known single element
-            Peeked::Twice((elem @ Some(_), None)) => elem,
+            // We know that we are empty.
+            Peeked::Peeked((None, _)) => None,
+            // known terminal
+            Peeked::Peeked((elem @ Some(_), Some(None))) => elem,
             // all some implies final peeked elem may be 
             // last if underlying iterator last is none
-            Peeked::Once((_, elem @ Some(_))) 
-            | Peeked::Twice((Some(_), elem @ Some(_))) => self.iter.last().or(elem)
+            Peeked::Peeked((elem @ Some(_), None)) | Peeked::Peeked((Some(_), Some(elem @ Some(_)))) => self.iter
+                .last()
+                .or(elem)
         }
     }
 
@@ -1072,16 +1172,15 @@ impl<T: Iterator> Iterator for Peekable<T> {
     {
         let acc = match self.peeked.drain() {
             // known terminal states
-            Peeked::Once((_, None)) | Peeked::Twice((None, _)) => return init,
-            Peeked::Twice((Some(first), None))                 => return fold(init, first),
-
+            Peeked::Peeked((None, _))                         => return init,
+            Peeked::Peeked((Some(first), Some(None)))         => return fold(init, first),
             // delegate to underlying iterator
-            Peeked::Twice((Some(first), Some(second))) => {
+            Peeked::Peeked((Some(first), None))               => fold(init, first),
+            Peeked::Empty                                     => init,
+            Peeked::Peeked((Some(first), Some(Some(second)))) => {
                 let acc = fold(init, first);
                 fold(acc, second)
-            },
-            Peeked::Once((_, Some(first)))             => fold(init, first),
-            Peeked::Empty                              => init
+            }
         };
 
         self.iter.fold(acc, fold)
@@ -1097,13 +1196,13 @@ impl<T: Iterator> Iterator for Peekable<T> {
     {
         let peek_res = match self.peeked.drain() {
             // non-known terminals
-            Peeked::Once((_, Some(elem)))              => f(elem),
-            Peeked::Twice((Some(first), Some(second))) => f(first) && f(second),
-            Peeked::Empty                              => true,
+            Peeked::Peeked((Some(elem), None))                => f(elem),
+            Peeked::Peeked((Some(first), Some(Some(second)))) => f(first) && f(second),
+            Peeked::Empty                                     => true,
             
             // terminal
-            Peeked::Once((_, None)) | Peeked::Twice((None, _)) => return true,    // empty -> true
-            Peeked::Twice((Some(elem), None))                  => return f(elem), // known len 1 
+            Peeked::Peeked((None, _))                => return true,   // empty -> true
+            Peeked::Peeked((Some(elem), Some(None))) => return f(elem) // known len 1
         };
 
         peek_res && self.iter.all(f)
@@ -1117,13 +1216,13 @@ impl<T: Iterator> Iterator for Peekable<T> {
     {
         let peek_res = match self.peeked.drain() {
             // non-known terminals
-            Peeked::Once((_, Some(elem)))              => f(elem),
-            Peeked::Twice((Some(first), Some(second))) => f(first) || f(second),
-            Peeked::Empty                              => false,
+            Peeked::Peeked((Some(elem), None))                => f(elem),
+            Peeked::Peeked((Some(first), Some(Some(second)))) => f(first) || f(second),
+            Peeked::Empty                                     => false,
             
             // terminal
-            Peeked::Once((_, None)) | Peeked::Twice((None, _)) => return false,   // empty -> false
-            Peeked::Twice((Some(elem), None))                  => return f(elem), // known len 1 
+            Peeked::Peeked((None, _))                => return false,  // empty -> false 
+            Peeked::Peeked((Some(elem), Some(None))) => return f(elem) // known len 1
         };
 
         peek_res || self.iter.any(f)
@@ -1136,10 +1235,8 @@ impl<T: Iterator> Iterator for Peekable<T> {
             P: FnMut(&Self::Item) -> bool,
     {
         match self.peeked.drain() {
-            // cover potential peeked find
-            Peeked::Once((_, Some(elem))) => if predicate(&elem) { return Some(elem) } else {/* continue */}, 
-            
-            Peeked::Twice((Some(elem), Some(n_elem))) => if predicate(&elem) {
+            Peeked::Peeked((Some(elem), None)) => if predicate(&elem) { return Some(elem) } else { /* continue */ },
+            Peeked::Peeked((Some(elem), Some(Some(n_elem)))) => if predicate(&elem) {
                 // move n_elem to Once
                 self.peeked = Peeked::once(Some(n_elem));
                 return Some(elem)
@@ -1150,9 +1247,10 @@ impl<T: Iterator> Iterator for Peekable<T> {
             },
 
             // cover peeked indication of termination
-            Peeked::Once((_, None)) | Peeked::Twice((None, _)) => return None,
+            Peeked::Peeked((None, _)) => return None,
+
             // cover known termination with single entry
-            Peeked::Twice((Some(elem), None)) => return predicate(&elem).then_some(elem),
+            Peeked::Peeked((Some(elem), Some(None))) => return predicate(&elem).then_some(elem),
 
             // peeked is empty, continue to underlying iterator
             Peeked::Empty => {}
@@ -1168,10 +1266,8 @@ impl<T: Iterator> Iterator for Peekable<T> {
             F: FnMut(Self::Item) -> Option<B>
     {
         match self.peeked.drain() {
-            // cover potential peeked find
-            Peeked::Once((_, Some(elem))) => if let Some(out) = f(elem) { return Some(out) } else {/* continue */}, 
-            
-            Peeked::Twice((Some(elem), Some(n_elem))) => if let Some(out) = f(elem) {
+            Peeked::Peeked((Some(elem), None)) => if let Some(out) = f(elem) { return Some(out) } else {/* continue */},
+            Peeked::Peeked((Some(elem), Some(Some(n_elem)))) => if let Some(out) = f(elem) {
                 // n_elem -> Once
                 self.peeked = Peeked::once(Some(n_elem));
                 return Some(out)
@@ -1182,9 +1278,10 @@ impl<T: Iterator> Iterator for Peekable<T> {
             },
 
             // cover peeked indication of termination
-            Peeked::Once((_, None)) | Peeked::Twice((None, _)) => return None,
+            Peeked::Peeked((None, _)) => return None,
+
             // cover known termination with single entry
-            Peeked::Twice((Some(elem), None)) => return f(elem),
+            Peeked::Peeked((Some(elem), Some(None))) => return f(elem),
 
             // peeked is empty, continue to underlying iterator
             Peeked::Empty => {}
@@ -1201,9 +1298,8 @@ impl<T: Iterator> Iterator for Peekable<T> {
     {
         let offset = match self.peeked.drain() {
             // cover potential peeked find
-            Peeked::Once((_, Some(elem))) => if predicate(elem) { return Some(0) } else {/* continue */ 1}, 
-
-            Peeked::Twice((Some(elem), Some(n_elem))) => if predicate(elem) {
+            Peeked::Peeked((Some(elem), None)) => if predicate(elem) { return Some(0) } else {/* continue */ 1},
+            Peeked::Peeked((Some(elem), Some(Some(n_elem)))) => if predicate(elem) {
                 // move n_elem -> Once
                 self.peeked = Peeked::once(Some(n_elem));
                 return Some(0)
@@ -1214,12 +1310,13 @@ impl<T: Iterator> Iterator for Peekable<T> {
                 2
             },
             
-            // cover peeked indication of termination
-            Peeked::Once((_, None)) | Peeked::Twice((None, _)) => return None,
-            // cover known termination with single entry
-            Peeked::Twice((Some(elem), None)) => return predicate(elem).then_some(0),
+            // We are empty.
+            Peeked::Peeked((None, _)) => return None,
 
-            // peeked is empty, continue to underlying iterator
+            // We know we only have a single element.
+            Peeked::Peeked((Some(elem), Some(None))) => return predicate(elem).then_some(0), 
+
+            // peeked is empty, continue to underlying iterator.
             Peeked::Empty => 0
         };
 
@@ -1240,19 +1337,12 @@ impl<T: DoubleEndedIterator> DoubleEndedIterator for Peekable<T> {
             // I think the inversion of operations is sound. Requires testing ofc.
             None => match self.peeked.drain() {
                 // iter returned none thus we are complete.
-                Peeked::Empty => None,
-                // once this elem is drained we are complete.
-                Peeked::Once((_, elem)) => elem,
-                // Since we are going backwards we will invert our typical op
-                // here, returning second and moving first into once
-                // 
-                // we must ensure second is Some, otherwise we should move directly 
-                // to first, leaving the peeked empty
-                Peeked::Twice((first, second @ Some(_))) => {
-                    self.peeked = Peeked::once(first);
-                    second
-                },
-                Peeked::Twice((first, None)) => first
+                Peeked::Empty                                  => None,
+                Peeked::Peeked((elem, None | Some(None)))      => elem,
+                Peeked::Peeked((s_last, Some(elem @ Some(_)))) => {
+                    self.peeked = Peeked::once(s_last);
+                    elem
+                }
             }
         }
     }
@@ -1263,21 +1353,22 @@ impl<T: DoubleEndedIterator> DoubleEndedIterator for Peekable<T> {
     {
         match self.peeked.drain() {
             // terminal states
-            Peeked::Once((_, None)) | Peeked::Twice((None, _)) => init,
+            Peeked::Peeked((None, _)) => init,
             // transparent to underlying iter rfold
             Peeked::Empty => self.iter.rfold(init, fold),
+
             // underlying iter rfold -> peeked elems in reverse order
-            Peeked::Once((_, Some(last))) => {
+            Peeked::Peeked((Some(last), None)) => {
                 let acc = self.iter.rfold(init, &mut fold);
                 fold(acc, last)
             },
-            Peeked::Twice((Some(last), Some(s_last))) => {
+            Peeked::Peeked((Some(last), Some(Some(s_last)))) => {
                 let acc = self.iter.rfold(init, &mut fold);
                 let acc = fold(acc, s_last);
                 fold(acc, last)
             },
             // finally, we never touch the underlying iterator and simply call fold
-            Peeked::Twice((Some(last), None)) => fold(init, last)
+            Peeked::Peeked((Some(last), Some(None))) => fold(init, last)
         }
     }
 
@@ -1300,19 +1391,33 @@ impl<T: DoubleEndedIterator> DoubleEndedIterator for Peekable<T> {
         // we did not find anything, check peeked in rev order
         match self.peeked.drain() {
             // nothing was found
-            Peeked::Empty | Peeked::Once((_, None)) | Peeked::Twice((None, _)) => None,
-            Peeked::Once((_, Some(elem))) => predicate(&elem).then_some(elem),
-            Peeked::Twice((Some(last), Some(s_last))) => if predicate(&s_last) {
+            Peeked::Empty | Peeked::Peeked((None, _))       => None,
+            Peeked::Peeked((Some(elem), None))              => predicate(&elem).then_some(elem),
+            Peeked::Peeked((Some(last), Some(None)))        => predicate(&last).then_some(last),
+            Peeked::Peeked((Some(elem), Some(Some(first)))) => if predicate(&first) {
                 // move last to Once
-                self.peeked = Peeked::once(Some(last));
-                Some(s_last)
+                self.peeked = Peeked::once(Some(elem));
+                Some(first)
             } else {
-                predicate(&last).then_some(last)
-            },
-            Peeked::Twice((Some(last), None)) => predicate(&last).then_some(last)
+                predicate(&elem).then_some(elem)
+            }
         }
     }
 }
+
+impl<T: ExactSizeIterator> ExactSizeIterator for Peekable<T> {
+    #[inline]
+    fn len(&self) -> usize {
+        let peek_len = match self.peeked.maybe_term() {
+            MaybeTerm::Size(known_size) => return known_size,
+            MaybeTerm::Add(amnt) => amnt
+        };
+
+        self.iter.len() + peek_len
+    }
+}
+
+impl<T: FusedIterator> FusedIterator for Peekable<T> {}
 
 #[cfg(test)]
 mod tests {
@@ -1765,5 +1870,108 @@ mod tests {
                 prop_assert_eq!(iter.rfind(|x| *x == &0), iter_spec.rfind(|x| *x == &0), "Extra iters failure.");
             }
         }
+
+        #[test]
+        fn exact_size_len(collection in any::<Vec<()>>()) {
+            let peekable = Peekable::new(collection.iter());
+            let iter = collection.iter();
+
+            prop_assert_eq!(iter.len(), peekable.len());
+        }
+
+        #[test]
+        fn exact_size_len_peeked(collection in any::<Vec<()>>()) {
+            let mut peekable = Peekable::new(collection.iter());
+            let iter = collection.iter();
+
+            let _ = peekable.peek();
+
+            prop_assert_eq!(iter.len(), peekable.len());
+        }
+
+        #[test]
+        fn exact_size_len_peeked_2(collection in any::<Vec<()>>()) {
+            let mut peekable = Peekable::new(collection.iter());
+            let iter = collection.iter();
+            
+            let _ = peekable.peek_2();
+
+            prop_assert_eq!(iter.len(), peekable.len());
+        } 
+    }
+}
+
+#[cfg(all(kani, test))]
+mod checks {
+    use kani::proof;
+    use super::*;
+
+    #[proof]
+    fn next_always_decrements_len() {
+        let mut iter = Peekable::new([1, 2, 3, 4].into_iter());
+
+        let len = iter.len();
+        iter.next();
+
+        kani::assert(iter.len() == len - 1, "Length decrements as iterator is consumed.");
+
+        let _ = iter.peek();
+        kani::assert(iter.len() == len - 1, "Peek must not alter the length.");
+        let _ = iter.peek_2();
+        kani::assert(iter.len() == len - 1, "Peek2 must not alter the length.");
+
+        iter.next();
+        kani::assert(iter.len() == len - 2, "Length decrements as iterator is consumed under peek2 state.");
+        kani::assert(iter.peek_state().only_one(), "Next transitions from peek2 to peek");
+
+        iter.next();
+        kani::assert(iter.len() == len - 3, "Length decrements as iterator is consumed under peek state.");
+        kani::assert(iter.peek_state().is_empty(), "Next transitions from peek to empty");
+    }
+
+    #[proof]
+    fn take_approaches_empty() {
+        let mut iter = Peekable::new([1, 2, 3, 4].into_iter());
+        let _ = iter.peek_2();
+
+        kani::assert(iter.peek_state().is_full(), "fill ensures the state is full.");
+        kani::assert(iter.peeked.take().is_some(), "`take` always returns Some when state is non-empty.");
+        kani::assert(iter.peek_state().only_one(), "`take` transitions full to only one");
+        kani::assert(iter.peeked.take().is_some(), "`take` always returns Some when state is non-empty.");
+        kani::assert(iter.peek_state().is_empty(), "`take` transitions only one to empty`");
+        kani::assert(iter.peeked.take().is_none(), "`take` while empty always results in None");
+        kani::assert(iter.peek_state().is_empty(), "`take` transitions empty to empty");
+    }
+
+    #[proof]
+    fn fill() {
+        let mut iter = Peekable::new([1, 2, 3, 4].into_iter());
+        let _ = iter.peek_2();
+
+        // the inline assertions make this redundant. This is for clarity.
+        kani::assert(iter.peek_state().is_full(), "peek_2's usage of `fill` ensures the state is full.");
+    }
+
+    #[proof]
+    fn fill_from_once() {
+        let mut iter = Peekable::new([1, 2, 3, 4].into_iter());
+        let _ = iter.peek();
+        kani::assert(iter.peek_state().only_one(), "one transition without any take ensures the state is Once.");
+
+        let _ = iter.peek_2();
+        kani::assert(iter.peek_state().is_full(), "peek_2's usage of `fill` ensures the state is full.");
+    }
+
+    #[proof]
+    fn transition() {
+        let mut iter = Peekable::new([1, 2, 3, 4].into_iter());
+        let _ = iter.peek();
+        kani::assert(iter.peek_state().only_one(), "one transition without any take ensures the state is Once.");
+
+        let mut peek = iter.peek();
+        let _ = peek.peek();
+
+        // inline assertions again make this redundant, for clarity.
+        kani::assert(iter.peek_state().is_full(), "two transitions without any take ensures the state is full.");
     }
 }
