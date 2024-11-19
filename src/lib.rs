@@ -37,7 +37,7 @@ macro_rules! bicond {
     }
 }
 
-#[repr(align(16))] 
+#[repr(align(16))]
 #[repr(u8)]
 enum Peeked<T> {
     Empty,
@@ -644,6 +644,109 @@ impl<'r, T: Iterator> Peek<'r, T> {
             _ => unreachable!()
         }
     }
+
+    /// Precondition: State is full
+    /// Postcondition: State has one /\ result.is_some()
+    #[inline(always)]
+    fn take_some_second_impl(&mut self) -> Option<T::Item> {
+        #[cfg(kani)] {
+            kani::assert(
+                self.src.peeked.is_full(), 
+                "`take_some_second` must only be called when the state is full."
+            );
+            kani::assert(
+                matches!(&self.src.peeked, Peeked::Peeked((_, Some(Some(_))))),
+                "`take_some_second` must only be called when the second peek is Some." 
+            );
+        }
+
+        match &mut self.src.peeked {
+            Peeked::Peeked((_, second)) => {
+                #[cfg(feature = "allow-unsafe")] unsafe {
+                    // Precondition guarantees safety.
+                    second.take().unwrap_unchecked()
+                }
+                #[cfg(not(feature = "allow-unsafe"))] {
+                    // Precondition guarantees infallible.
+                    second.take().unwrap()
+                }
+            },
+            #[cfg(feature = "allow-unsafe")]
+            _ => unsafe { core::hint::unreachable_unchecked() },
+            #[cfg(not(feature = "allow-unsafe"))]
+            _ => unreachable!()
+        }
+    }
+
+    /// Precondition: State is full
+    /// Postcondition: State has one /\ result.is_some()
+    #[inline(always)]
+    #[cfg(kani)]
+    fn take_some_second(&mut self) -> Option<T::Item> {
+        let res = self.take_some_second_impl();
+
+        kani::assert(
+            res.is_some(),
+            "`take_some_second` postcondition not satisfied, result must be Some."
+        );
+        kani::assert(
+            self.src.peeked.only_one(),
+            "`take_some_second` postcondition not satisfied, state must be only one" 
+        );
+
+        res
+    }
+
+    /// Precondition: State is full
+    /// Postcondition: State has one /\ result.is_some()
+    #[inline(always)]
+    #[cfg(not(kani))]
+    fn take_some_second(&mut self) -> Option<T::Item> { self.take_some_second_impl() }
+
+    /// Take only the second element, removing it from the iterator.
+    /// 
+    /// Unlike [`drain_if`] or [`next_if`], this removes the second element if the 
+    /// predicate was satisfied, effectively modifying the order of the iterator. 
+    /// This is similar to if you were to have a `Vec` and called `remove(1)` behind 
+    /// some branch.
+    /// 
+    /// # Example
+    /// 
+    /// ```
+    /// # use peek_again::Peekable;
+    /// let mut iter = Peekable::new([1, 2, 3, 4].into_iter());
+    /// 
+    /// let mut peeked = iter.peek();
+    /// assert_eq!(
+    ///     peeked.take_next_if(|elem| elem == &2),
+    ///     Some(2)
+    /// );
+    /// 
+    /// assert_eq!(iter.next(), Some(1));
+    /// assert_eq!(iter.next(), Some(3)); // removed 2
+    /// assert_eq!(iter.next(), Some(4));
+    /// ```
+    /// 
+    /// [`drain_if`]: Self::drain_if
+    /// [`next_if`]: Peekable::next_if
+    pub fn take_next_if<F>(&mut self, predicate: F) -> Option<T::Item> 
+        where F: FnOnce(&T::Item) -> bool
+    {
+        #[cfg(kani)] { kani::assert(self.is_safe(), "`Peek` invariant violated, state must be non-empty`"); }
+        self.src.transition_forward();
+        
+        #[cfg(kani)] {
+            kani::assert(
+                self.src.peeked.is_full(), 
+                "`transition_forward` postcondition /\\ Peek's invariant -> is_full"
+            );
+        }
+
+        match &self.src.peeked {
+            Peeked::Peeked((_, Some(Some(second)))) if predicate(second) => self.take_some_second(),
+            _ => None
+        }
+    }
 }
 
 /// Interface for the current state of the [`Peekable`] iterator.
@@ -829,9 +932,7 @@ impl<T: Iterator> Peekable<T> {
     fn transition_forward(&mut self) {
         #[cfg(kani)]
         let num_peeked = self.peeked.num_peeked();
-
-        // since we are only to be used in a peek, the state of peeked must not be empty. 
-        // We are either transitioning to twice, or returning the final twice element. 
+        #[cfg(kani)] { kani::assert(num_peeked != 0, "Precondition violated, state must not be empty"); }
 
         match &mut self.peeked {
             Peeked::Peeked((_, sec @ None)) => {*sec = Some(self.iter.next())},
@@ -841,9 +942,8 @@ impl<T: Iterator> Peekable<T> {
         #[cfg(kani)] {
             let post_num_peeked = self.peeked.num_peeked();
             kani::assert(
-                bicond!((num_peeked == 0) <=> (post_num_peeked == 1))   &&
-                kani::implies!(num_peeked == 1 => post_num_peeked == 2) &&
-                kani::implies!(num_peeked == 2 => post_num_peeked == 2),
+                bicond!((num_peeked == 1 || num_peeked == 2) <=> (post_num_peeked == 2)) &&
+                post_num_peeked == 2, // this can be simplified
                 "`transition_forward` always approaches `Twice`"
             );
         }
@@ -1973,5 +2073,60 @@ mod checks {
 
         // inline assertions again make this redundant, for clarity.
         kani::assert(iter.peek_state().is_full(), "two transitions without any take ensures the state is full.");
+    }
+
+    #[proof]
+    fn take_next_if() {
+        let mut iter = Peekable::new([1, 2, 3, 4].into_iter());
+        let mut peeked = iter.peek();
+
+        let item = peeked.take_next_if(|elem| elem == &2);
+        kani::assert(item == Some(2), "take_next_if returns elem given to predicate");
+
+        kani::assert(iter.next() == Some(1), "iter behaves normally with second elem removed");
+        kani::assert(iter.next() == Some(3), "iter behaves normally with second elem removed");
+        kani::assert(iter.next() == Some(4), "iter behaves normally with second elem removed");
+        kani::assert(iter.next().is_none(), "iter behaves normally with second elem removed");
+        kani::assert(iter.next().is_none(), "iter behaves normally with second elem removed");
+    }
+
+    #[proof]
+    fn take_next_if_pred_false() {
+        let mut iter = Peekable::new([1, 2, 3, 4].into_iter());
+        let mut peeked = iter.peek();
+
+        let item = peeked.take_next_if(|elem| elem == &7);
+        kani::assert(item.is_none(), "take_next_if returns None when predicate not met");
+
+        kani::assert(iter.next() == Some(1), "iter behaves normally with predicate failed");
+        kani::assert(iter.next() == Some(2), "iter behaves normally with predicate failed");
+        kani::assert(iter.next() == Some(3), "iter behaves normally with predicate failed");
+        kani::assert(iter.next() == Some(4), "iter behaves normally with predicate failed");
+        kani::assert(iter.next().is_none(), "iter behaves normally with predicate failed");
+        kani::assert(iter.next().is_none(), "iter behaves normally with predicate failed");
+    }
+
+    #[proof]
+    fn take_next_if_one_elem() {
+        let mut iter = Peekable::new([1].into_iter());
+        let mut peeked = iter.peek();
+
+        let item = peeked.take_next_if(|_| unreachable!());
+        kani::assert(item.is_none(), "take_next_if returns None when predicate not met (which is always w/ empty)"); 
+        kani::assert(iter.next() == Some(1), "iter behaves normally with predicate failed");
+        kani::assert(iter.next().is_none(), "iter behaves normally with predicate failed");
+        kani::assert(iter.next().is_none(), "iter behaves normally with predicate failed");
+    }
+
+    #[proof]
+    fn take_next_if_empty() {
+        let list: [u8; 0] = [];
+        let mut iter = Peekable::new(list.into_iter());
+        let mut peeked = iter.peek();
+
+        let item = peeked.take_next_if(|_| unreachable!());
+        kani::assert(item.is_none(), "take_next_if returns None when predicate not met (which is always w/ empty)"); 
+        kani::assert(iter.next().is_none(), "iter behaves normally with predicate failed");
+        kani::assert(iter.next().is_none(), "iter behaves normally with predicate failed");
     }
 }
