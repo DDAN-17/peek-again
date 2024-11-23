@@ -60,6 +60,20 @@ fn benchmark(c: &mut Criterion) {
             assert_eq!(black_box(res), 1);
         })
     });
+
+    c.bench_function("std-next-if-wrong", |b| {
+        b.iter(|| {
+            let res = std.next_if(|item| item == &2);
+            assert!(black_box(res).is_none());
+        })
+    });
+
+    c.bench_function("again-next-if-wrong", |b| {
+        b.iter(|| {
+            let res = again.next_if(|item| item == &2);
+            assert!(black_box(res).is_none());
+        })
+    });
 }
 
 criterion_group!(benches, benchmark);

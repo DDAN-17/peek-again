@@ -25,6 +25,13 @@ fn benchmark(c: &mut Criterion) {
         })
     });
 
+    c.bench_function("again-next-if-wrong", |b| {
+        b.iter(|| {
+            let res = again.next_if(|item| item == &2);
+            assert!(black_box(res).is_none());
+        })
+    });
+
     // with this usage, this will outperform next_if
     c.bench_function("next-if-via-consume", |b| {
         b.iter(|| {

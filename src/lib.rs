@@ -3,6 +3,8 @@
 #![no_builtins]
 #![deny(missing_docs)]
 #![doc = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/README.md"))]
+#![warn(clippy::all, clippy::pedantic)]
+#![allow(clippy::inline_always)]
 
 extern crate core;
 use core::{fmt, mem, iter::{Iterator, DoubleEndedIterator, ExactSizeIterator, FusedIterator}};
@@ -39,9 +41,22 @@ macro_rules! bicond {
 
 #[repr(align(16))]
 #[repr(u8)]
+#[derive(Copy, Clone)]
 enum Peeked<T> {
     Empty,
+    #[allow(clippy::option_option)]
     Peeked((Option<T>, Option<Option<T>>))
+}
+
+impl<T: fmt::Debug> fmt::Debug for Peeked<T> {
+    /// Writes the `Peeked` state to the provided `Formatter`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty                    => f.write_str("Peeked::Empty"),
+            Self::Peeked((one, None))      => write!(f, "Peeked::Once({one:?})"),
+            Self::Peeked((one, Some(two))) => write!(f, "Peeked::Twice(({one:?}, {two:?}))")
+        }
+    }
 }
 
 macro_rules! is_some_and {
@@ -84,11 +99,7 @@ impl<T> Peeked<T> {
     #[inline]
     #[must_use]
     const fn is_term(&self) -> bool {
-        // probably should be matches! 
-        match self {
-            Self::Peeked((None, _)) => true,
-            _ => false
-        }
+        matches!(self, Self::Peeked((None, _)))
     }
 
     #[inline]
@@ -107,6 +118,7 @@ impl<T> Peeked<T> {
 
     #[inline(always)]
     #[must_use]
+    #[allow(clippy::option_option)]
     fn take_inner(&mut self) -> Option<Option<T>> {
         // empty -> once -> twice (once, new)
         //      peek    peek 
@@ -134,6 +146,7 @@ impl<T> Peeked<T> {
     #[inline]
     #[must_use]
     #[cfg(not(kani))]
+    #[allow(clippy::option_option)]
     fn take(&mut self) -> Option<Option<T>> {
         self.take_inner()
     }
@@ -351,6 +364,7 @@ impl<'r, T> PartialEq<Option<&T::Item>> for Peek<'r, T>
 {
     // originally was inline, when changing to inline(always) perf 2x'd
     #[inline(always)]
+    #[allow(clippy::ref_option_ref)]
     fn eq(&self, other: &Option<&T::Item>) -> bool { 
         self.get().eq(other)
     }
@@ -361,6 +375,7 @@ impl<'r, T> fmt::Debug for Peek<'r, T>
         T: Iterator,
         <T as Iterator>::Item: fmt::Debug
 {
+    /// Writes "Peek(elem?)" to the provided `Formatter`. 
     #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("Peek").field(&self.get()).finish()
@@ -410,6 +425,7 @@ impl<'r, T: Iterator> Peek<'r, T> {
 
     /// Get a reference to the underlying peeked element.
     #[inline]
+    #[must_use]
     #[cfg(not(kani))]
     pub const fn get(&self) -> Option<&T::Item> {
         self.get_impl()
@@ -578,6 +594,7 @@ impl<'r, T: Iterator> Peek<'r, T> {
     /// [`next_if`]: Peekable::next_if
     /// [`next`]: Peekable::next
     #[inline]
+    #[allow(clippy::must_use_candidate)] // one may simply want to advance the iterator.
     pub fn consume(self) -> Option<T::Item> {
         #[cfg(kani)] { kani::assert(self.is_safe(), "`Peek` invariant violated, state must be non-empty`"); }
         self.consume_impl()
@@ -646,7 +663,7 @@ impl<'r, T: Iterator> Peek<'r, T> {
     }
 
     /// Precondition: State is full
-    /// Postcondition: State has one /\ result.is_some()
+    /// Postcondition: State has one /\ `result.is_some()`
     #[inline(always)]
     fn take_some_second_impl(&mut self) -> Option<T::Item> {
         #[cfg(kani)] {
@@ -679,7 +696,7 @@ impl<'r, T: Iterator> Peek<'r, T> {
     }
 
     /// Precondition: State is full
-    /// Postcondition: State has one /\ result.is_some()
+    /// Postcondition: State has one /\ `result.is_some()`
     #[inline(always)]
     #[cfg(kani)]
     fn take_some_second(&mut self) -> Option<T::Item> {
@@ -698,7 +715,7 @@ impl<'r, T: Iterator> Peek<'r, T> {
     }
 
     /// Precondition: State is full
-    /// Postcondition: State has one /\ result.is_some()
+    /// Postcondition: State has one /\ `result.is_some()`
     #[inline(always)]
     #[cfg(not(kani))]
     fn take_some_second(&mut self) -> Option<T::Item> { self.take_some_second_impl() }
@@ -867,9 +884,25 @@ impl<'r, T> PeekState<'r, T> {
 /// ```
 /// 
 /// [1]: core::iter::Peekable
+#[derive(Copy, Clone)]
 pub struct Peekable<T: Iterator> {
     iter: T,
     peeked: Peeked<T::Item>
+}
+
+impl<S: IntoIterator<IntoIter = T>, T: Iterator> From<S> for Peekable<T> {
+    /// Convert from any type which implements [`IntoIterator`] to a [`Peekable`] 
+    /// iterator.
+    /// 
+    /// # Example
+    /// 
+    /// ```
+    /// # use peek_again::Peekable;
+    /// let mut iter: Peekable<_> = [1u8, 2u8, 3u8, 4u8].into();
+    /// assert_eq!(iter.peek(), Some(&1));
+    /// ```
+    #[inline]
+    fn from(into_iter: S) -> Self { Self::new(into_iter.into_iter()) }
 }
 
 impl<T: Iterator> Peekable<T> {
@@ -934,10 +967,7 @@ impl<T: Iterator> Peekable<T> {
         let num_peeked = self.peeked.num_peeked();
         #[cfg(kani)] { kani::assert(num_peeked != 0, "Precondition violated, state must not be empty"); }
 
-        match &mut self.peeked {
-            Peeked::Peeked((_, sec @ None)) => {*sec = Some(self.iter.next())},
-            _ => {}
-        }
+        if let Peeked::Peeked((_, sec @ None)) = &mut self.peeked {*sec = Some(self.iter.next())}
 
         #[cfg(kani)] {
             let post_num_peeked = self.peeked.num_peeked();
@@ -1191,6 +1221,46 @@ impl<T: Iterator> Peekable<T> {
     }
 }
 
+impl<T> fmt::Debug for Peekable<T> 
+    where 
+        T: Iterator + fmt::Debug,
+        <T as Iterator>::Item: fmt::Debug
+{
+    /// Writes the current state and underlying iterator to the `Formatter`.
+    /// 
+    /// # Example
+    /// 
+    /// ```
+    /// # use peek_again::Peekable;
+    /// let mut iter = Peekable::from([1, 2, 3, 4]);
+    /// 
+    /// assert_eq!(
+    ///     format!("{iter:?}"),
+    ///     "Peekable { state: Peeked::Empty, iter: IntoIter([1, 2, 3, 4]) }"
+    /// );
+    /// 
+    /// let _ = iter.peek();
+    /// 
+    /// assert_eq!(
+    ///     format!("{iter:?}"),
+    ///     "Peekable { state: Peeked::Once(Some(1)), iter: IntoIter([2, 3, 4]) }"
+    /// );
+    /// 
+    /// let _ = iter.peek_2();
+    /// 
+    /// assert_eq!(
+    ///     format!("{iter:?}"),
+    ///     "Peekable { state: Peeked::Twice((Some(1), Some(2))), iter: IntoIter([3, 4]) }"
+    /// );
+    /// ```
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Peekable")
+            .field("state", &self.peeked)
+            .field("iter", &self.iter)
+            .finish()
+    }
+}
+
 impl<T: Iterator> Iterator for Peekable<T> {
     type Item = T::Item;
 
@@ -1244,7 +1314,7 @@ impl<T: Iterator> Iterator for Peekable<T> {
             Peeked::Peeked((elem @ Some(_), Some(None))) => elem,
             // all some implies final peeked elem may be 
             // last if underlying iterator last is none
-            Peeked::Peeked((elem @ Some(_), None)) | Peeked::Peeked((Some(_), Some(elem @ Some(_)))) => self.iter
+            Peeked::Peeked((elem @ Some(_), None) | (Some(_), Some(elem @ Some(_)))) => self.iter
                 .last()
                 .or(elem)
         }
