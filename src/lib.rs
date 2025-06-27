@@ -220,6 +220,66 @@ impl<T> Peeked<T> {
     }
 }
 
+/// The result of [`Peek::drain_if_both`], providing either the `Drained` elements if 
+/// `predicate` returned `true`, otherwise returning the original [`Peek`] instance.
+/// 
+/// `drain_if` must take ownership, as a successful drain operation would violate [`Peek`]'s
+/// type invariant of always having one peeked element ready.
+#[must_use = "You must not ignore `drain_if` operation's result"]
+pub enum DrainIfBoth<'r, T: Iterator> {
+    /// The successful result of the `drain_if` operation.
+    Drained((T::Item, T::Item)),
+    /// The original [`Peek`] instance from the unsatisfied `drain_if` operation.
+    Peek(Peek<'r, T>)
+}
+
+impl<'r, T: Iterator> DrainIfBoth<'r, T> {
+    /// Returns `true` iff the drain operation succeeded.
+    #[must_use]
+    pub const fn is_drained(&self) -> bool {
+        matches!(self, Self::Drained(_))
+    }
+    
+    /// Extract the successful result of the `drain_if` operation.
+    #[inline]
+    pub fn drained(self) -> Option<(T::Item, T::Item)> {
+        match self {
+            Self::Drained(res) => Some(res),
+            Self::Peek(_)      => None
+        }
+    }
+    
+    /// Extract the original [`Peek`] instance from the unsatisfied `drain_if` operation.
+    #[inline]
+    pub fn peek(self) -> Option<Peek<'r, T>> {
+        match self {
+            Self::Peek(peek) => Some(peek),
+            Self::Drained(_) => None
+        }
+    }
+    
+    /// Maps the failure (which returns the [`Peek`] instance) and success (the drained elements)
+    /// to `R`.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `e` - A function which takes the original [`Peek`] instance, to potentially recover
+    ///   from the predicate not being met.
+    /// * `map` - A function which takes the drained elements if the predicate was met.
+    #[inline]
+    pub fn map_or_else<E, F, R>(self, e: E, map: F) -> R 
+        where
+            E: FnOnce(Peek<'r, T>) -> R,
+            F: FnOnce(T::Item, T::Item) -> R
+    {
+        match self {
+            Self::Drained((first, second)) => map(first, second),
+            Self::Peek(peek)   => e(peek)
+        }
+    }
+}
+
+
 /// The result of [`Peek::drain_if`], providing either the `Drained` elements if 
 /// `predicate` returned `true`, otherwise returning the original [`Peek`] instance.
 /// 
@@ -234,6 +294,12 @@ pub enum DrainIf<'r, T: Iterator> {
 }
 
 impl<'r, T: Iterator> DrainIf<'r, T> {
+    /// Returns `true` iff the drain operation succeeded.
+    #[must_use]
+    pub const fn is_drained(&self) -> bool {
+        matches!(self, Self::Drained(_))
+    }
+    
     /// Extract the successful result of the `drain_if` operation.
     #[inline]
     pub fn drained(self) -> Option<(Option<T::Item>, T::Item)> {
@@ -655,6 +721,60 @@ impl<'r, T: Iterator> Peek<'r, T> {
                 _ => {
                     self.src.peeked = Peeked::twice(first, second);
                     DrainIf::Peek(self)
+                }
+            },
+            // Due to transition_forward we are guaranteed to be full.
+            _ => unreachable!()
+        }
+    }
+    
+    /// Drain the peeked elements if `predicate` returns `true`.
+    /// 
+    /// This is similar to [`drain_if`][1], the only distinction is both peeked elements are inspected.
+    /// 
+    /// # Returns
+    /// 
+    /// If the first and second peek were `Some`, and the `predicate` returned `true`, this will return
+    /// both peeked elements in order.
+    /// 
+    /// # Example
+    /// 
+    /// ```
+    /// # use peek_again::Peekable;
+    /// # 
+    /// let mut iter = Peekable::new([1, 2, 3, 4].into_iter());
+    /// let mut peeked = iter.peek();
+    /// 
+    /// // since we are peeked, drain_if is referencing the second element.
+    /// peeked.drain_if_both(|one, two| one == &1 && two == &2).map_or_else(
+    ///     |mut _peeked| unreachable!("The second element was two"),
+    ///     |first, second| {
+    ///         assert_eq!(first, 1);
+    ///         assert_eq!(second, 2);
+    ///     }
+    /// );
+    /// ```
+    /// 
+    /// [1]: Peek::drain_if
+    pub fn drain_if_both<F>(self, predicate: F) -> DrainIfBoth<'r, T> 
+        where F: FnOnce(&T::Item, &T::Item) -> bool
+    {
+        #[cfg(kani)] { kani::assert(self.is_safe(), "`Peek` invariant violated, state must be non-empty`"); }
+        self.src.transition_forward();
+        
+        #[cfg(kani)] {
+            kani::assert(
+                self.src.peeked.is_full(), 
+                "`transition_forward` postcondition /\\ Peek's invariant -> is_full"
+            );
+        }
+        
+        match mem::replace(&mut self.src.peeked, Peeked::Empty) {
+            Peeked::Peeked((Some(first), Some(second))) => match second {
+                Some(second) if predicate(&first, &second) => DrainIfBoth::Drained((first, second)),
+                _ => {
+                    self.src.peeked = Peeked::twice(Some(first), second);
+                    DrainIfBoth::Peek(self)
                 }
             },
             // Due to transition_forward we are guaranteed to be full.
@@ -1178,7 +1298,7 @@ impl<T: Iterator> Peekable<T> {
             }
         }
     }
-
+    
     /// Advances the iterator and returns the next value if it is equal to 
     /// the provided value.
     /// 
