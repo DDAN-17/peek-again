@@ -688,7 +688,7 @@ impl<'r, T: Iterator> Peek<'r, T> {
     /// # use peek_again::Peekable;
     /// # 
     /// let mut iter = Peekable::new([1, 2, 3, 4].into_iter());
-    /// let mut peeked = iter.peek();
+    /// let peeked = iter.peek();
     /// 
     /// // since we are peeked, drain_if is referencing the second element.
     /// peeked.drain_if(|next| next == &2).map_or_else(
@@ -744,7 +744,7 @@ impl<'r, T: Iterator> Peek<'r, T> {
     /// # use peek_again::Peekable;
     /// # 
     /// let mut iter = Peekable::new([1, 2, 3, 4].into_iter());
-    /// let mut peeked = iter.peek();
+    /// let peeked = iter.peek();
     /// 
     /// // since we are peeked, drain_if is referencing the second element.
     /// peeked.drain_if_both(|one, two| one == &1 && two == &2).map_or_else(
