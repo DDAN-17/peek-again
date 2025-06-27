@@ -5,6 +5,7 @@
 #![doc = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/README.md"))]
 #![warn(clippy::all, clippy::pedantic)]
 #![allow(clippy::inline_always)]
+#![allow(clippy::elidable_lifetime_names)]
 
 extern crate core;
 use core::{fmt, mem, iter::{Iterator, DoubleEndedIterator, ExactSizeIterator, FusedIterator}};
