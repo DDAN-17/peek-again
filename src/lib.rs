@@ -1,7 +1,7 @@
 #![cfg_attr(not(feature = "allow-unsafe"), forbid(unsafe_code))]
 #![no_std]
 #![no_builtins]
-#![deny(missing_docs)]
+#![cfg_attr(not(kani), deny(missing_docs))]
 #![doc = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/README.md"))]
 #![warn(clippy::all, clippy::pedantic)]
 #![allow(clippy::inline_always)]
@@ -496,7 +496,8 @@ impl<'r, T: Iterator> Peek<'r, T> {
     pub const fn get(&self) -> Option<&T::Item> {
         self.get_impl()
     }
-
+    
+    /// Get a reference to the underlying peeked element.
     #[inline]
     #[cfg(kani)]
     pub fn get(&self) -> Option<&T::Item> {
