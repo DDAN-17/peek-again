@@ -772,10 +772,10 @@ impl<'r, T: Iterator> Peek<'r, T> {
         }
         
         match mem::replace(&mut self.src.peeked, Peeked::Empty) {
-            Peeked::Peeked((Some(first), Some(second))) => match second {
-                Some(second) if predicate(&first, &second) => DrainIfBoth::Drained((first, second)),
-                _ => {
-                    self.src.peeked = Peeked::twice(Some(first), second);
+            Peeked::Peeked((first, Some(second))) => match (first, second) {
+                (Some(first), Some(second)) if predicate(&first, &second) => DrainIfBoth::Drained((first, second)),
+                (first, second) => {
+                    self.src.peeked = Peeked::twice(first, second);
                     DrainIfBoth::Peek(self)
                 }
             },
@@ -820,8 +820,8 @@ impl<'r, T: Iterator> Peek<'r, T> {
         }
         
         match &self.src.peeked {
-            Peeked::Peeked((Some(first), Some(second))) => match second {
-                Some(second) if predicate(&first, &second) => true,
+            Peeked::Peeked((first, Some(second))) => match (first, second) {
+                (Some(first), Some(second)) if predicate(&first, &second) => true,
                 _ => false,
             },
             _ => {
@@ -2256,6 +2256,45 @@ mod tests {
         
         assert!(iter.peek_state().is_empty());
         assert_eq!(iter.len(), 0);
+    }
+    
+    #[test]
+    fn drain_if_both_missing_elem() {
+        let mut iter = Peekable::new([1].into_iter());
+        let peeked = iter.peek();
+        
+        assert!(!peeked.drain_if_both(|a, b| a == &1 && b == &2).is_drained());
+    }
+    
+    #[test]
+    fn drain_if_both_empty() {
+        let list: [u8; 0] = [];
+        let mut iter = Peekable::new(list.into_iter());
+        let peeked = iter.peek();        
+        assert!(!peeked.drain_if_both(|a, b| a == &1 && b == &2).is_drained());
+    }
+    
+    #[test]
+    fn is_both_full_smoke() {
+        let mut iter = Peekable::new([1, 2].into_iter());
+        let mut peeked = iter.peek();
+        
+        assert!(peeked.is_both(|a, b| a == &1 && b == &2));
+        
+        assert!(iter.next() == Some(1));
+        assert!(iter.next() == Some(2));
+        assert!(iter.next() == None);
+    }
+    
+    #[test]
+    fn is_both_missing_elem() {
+        let mut iter = Peekable::new([1].into_iter());
+        let mut peeked = iter.peek();
+        
+        assert!(!peeked.is_both(|a, b| a == &1 && b == &2));
+        
+        assert!(iter.next() == Some(1));
+        assert!(iter.next() == None);
     }
 }
 
