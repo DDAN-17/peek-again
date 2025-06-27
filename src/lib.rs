@@ -783,6 +783,58 @@ impl<'r, T: Iterator> Peek<'r, T> {
             _ => unreachable!()
         }
     }
+    
+    /// Returns `true` if the next two peeked elements satisfy the predicate.
+    /// 
+    /// # Example
+    /// 
+    /// ```
+    /// # use peek_again::Peekable;
+    /// # 
+    /// let mut iter = Peekable::new([1, 2, 3, 4].into_iter());
+    /// let mut peeked = iter.peek();
+    /// 
+    /// if !peeked.is_both(|a, b| a == &1 && b == &2) {
+    ///     unreachable!("The next two elements are 1 and 2");
+    /// }
+    /// 
+    /// // is both does not advance the iterator
+    /// assert_eq!(iter.next(), Some(1));
+    /// assert_eq!(iter.next(), Some(2));
+    /// assert_eq!(iter.next(), Some(3));
+    /// // ...
+    /// # assert_eq!(iter.next(), Some(4));
+    /// # assert_eq!(iter.next(), None);
+    /// ```
+    pub fn is_both<F>(&mut self, predicate: F) -> bool
+        where F: FnOnce(&T::Item, &T::Item) -> bool
+    {
+        #[cfg(kani)] { kani::assert(self.is_safe(), "`Peek` invariant violated, state must be non-empty`"); }
+        self.src.transition_forward();
+        
+        #[cfg(kani)] {
+            kani::assert(
+                self.src.peeked.is_full(), 
+                "`transition_forward` postcondition /\\ Peek's invariant -> is_full"
+            );
+        }
+        
+        match &self.src.peeked {
+            Peeked::Peeked((Some(first), Some(second))) => match second {
+                Some(second) if predicate(&first, &second) => true,
+                _ => false,
+            },
+            _ => {
+                // SAFETY: We are currently full, thus this path is unreachable.
+                #[cfg(feature = "allow-unsafe")] {
+                    unsafe { core::hint::unreachable_unchecked() }
+                }
+                #[cfg(not(feature = "allow-unsafe"))] {
+                    unreachable!()
+                }
+            }
+        }
+    }
 
     /// Precondition: State is full
     /// Postcondition: State has one /\ `result.is_some()`
