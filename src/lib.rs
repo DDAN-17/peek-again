@@ -2190,6 +2190,20 @@ mod tests {
             prop_assert_eq!(iter.len(), peekable.len());
         } 
     }
+    
+    #[test]
+    fn drain_if_both_full_smoke() {
+        let mut iter = Peekable::new([1, 2].into_iter());
+        let peeked = iter.peek();
+        
+        let Some((a, b)) = peeked.drain_if_both(|a, b| a == &1 && b == &2).drained() else { unreachable!() };
+        
+        assert_eq!(a, 1);
+        assert_eq!(b, 2);
+        
+        assert!(iter.peek_state().is_empty());
+        assert_eq!(iter.len(), 0);
+    }
 }
 
 #[cfg(all(kani, test))]
@@ -2319,5 +2333,19 @@ mod checks {
         kani::assert(item.is_none(), "take_next_if returns None when predicate not met (which is always w/ empty)"); 
         kani::assert(iter.next().is_none(), "iter behaves normally with predicate failed");
         kani::assert(iter.next().is_none(), "iter behaves normally with predicate failed");
+    }
+    
+    #[proof]
+    fn drain_if_both_full() {
+        let mut iter = Peekable::new([1, 2].into_iter());
+        let peeked = iter.peek();
+        
+        let Some((a, b)) = peeked.drain_if_both(|a, b| a == &1 && b == &2).drained() else { unreachable!() };
+        
+        kani::assert(a == 1, "drained elements must maintain order");
+        kani::assert(b == 2, "drained elements must maintain order");
+        
+        kani::assert(iter.peek_state().is_empty(), "successfully draining must empty the peek state.");
+        kani::assert(iter.len() == 0, "successfully draining both elements must leave the iterator empty.");
     }
 }
