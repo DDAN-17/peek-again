@@ -4,8 +4,11 @@
 #![cfg_attr(not(kani), deny(missing_docs))]
 #![doc = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/README.md"))]
 #![warn(clippy::all, clippy::pedantic)]
+
+#![allow(unknown_lints)] // different versions of clippy
 #![allow(clippy::inline_always)]
 #![allow(clippy::elidable_lifetime_names)]
+#![allow(clippy::match_like_matches_macro)]
 
 extern crate core;
 use core::{fmt, mem, iter::{Iterator, DoubleEndedIterator, ExactSizeIterator, FusedIterator}};
@@ -821,7 +824,7 @@ impl<'r, T: Iterator> Peek<'r, T> {
         
         match &self.src.peeked {
             Peeked::Peeked((first, Some(second))) => match (first, second) {
-                (Some(first), Some(second)) if predicate(&first, &second) => true,
+                (Some(first), Some(second)) if predicate(first, second) => true,
                 _ => false,
             },
             _ => {
