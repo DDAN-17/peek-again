@@ -16,7 +16,7 @@ readme = "README.md"
 allow-unsafe = []
 
 [dev-dependencies]
-criterion = "0.5.1"
+# criterion = "0.5.0"
 proptest = "1.5.0"
 
 [profile.release]
