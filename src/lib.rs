@@ -2401,4 +2401,79 @@ mod checks {
         kani::assert(iter.peek_state().is_empty(), "successfully draining must empty the peek state.");
         kani::assert(iter.len() == 0, "successfully draining both elements must leave the iterator empty.");
     }
+    
+    #[proof]
+    fn drain_if_both_missing_elem() {
+        let mut iter = Peekable::new([1].into_iter());
+        let peeked = iter.peek();
+        
+        kani::assert(
+            !peeked.drain_if_both(|a, b| a == &1 && b == &2).is_drained(),
+            "drain_if_both when missing element is idempotent"
+        );
+        
+        kani::assert(iter.next() == Some(1), "iterator is unchanged");
+        kani::assert(iter.next().is_none(), "iterator terminated");
+    }
+    
+    #[proof]
+    fn drain_if_both_empty() {
+        let list: [u8; 0] = [];
+        let mut iter = Peekable::new(list.into_iter());
+        let peeked = iter.peek();
+        
+        kani::assert(
+            !peeked.drain_if_both(|a, b| a == &1 && b == &2).is_drained(),
+            "drain_if_both on empty iterator is idempotent"
+        );
+        
+        kani::assert(iter.len() == 0, "an empty iterator remains an empty iterator.");
+    }
+    
+    #[proof]
+    fn drain_if_both_idempotence() {
+        let mut iter = Peekable::new([1, 2].into_iter());
+        let peeked = iter.peek();
+        
+        kani::assert(
+            !peeked.drain_if_both(|a, b| a == &3 && b == &4).is_drained(),
+            "drain_if_both on failing predicate is idempotent"
+        );
+        
+        kani::assert(iter.next() == Some(1), "iterator is unchanged");
+        kani::assert(iter.next() == Some(2), "iterator is unchanged");
+        kani::assert(iter.next().is_none(), "iterator terminates");
+    }
+    
+    #[proof]
+    fn is_both_success() {
+        let mut iter = Peekable::new([1, 2].into_iter());
+        let mut peeked = iter.peek();
+        
+        kani::assert(peeked.is_both(|a, b| a == &1 && b == &2), "is both respects the predicate");
+        kani::assert(iter.next() == Some(1), "iterator is unchanged");
+        kani::assert(iter.next() == Some(2), "iterator is unchanged");
+        kani::assert(iter.next().is_none(), "iterator terminates");
+    }
+    
+    #[proof]
+    fn is_both_missing_elem() {
+        let mut iter = Peekable::new([1].into_iter());
+        let mut peeked = iter.peek();
+        
+        kani::assert(!peeked.is_both(|a, b| a == &1 && b == &2), "if cannot fill both, always is false");
+        kani::assert(iter.next() == Some(1), "iterator is unchanged");
+        kani::assert(iter.next().is_none(), "iterator terminates");
+    }
+    
+    #[proof]
+    fn is_both_empty() {
+        let list: [u8; 0] = [];
+        
+        let mut iter = Peekable::new(list.into_iter());
+        let mut peeked = iter.peek();
+        
+        kani::assert(!peeked.is_both(|a, b| a == &1 && b == &2), "if empty, always is false");
+        kani::assert(iter.next().is_none(), "iterator is unchanged and terminates");
+    }
 }
