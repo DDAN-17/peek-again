@@ -1,0 +1,13 @@
+name: Kani CI
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+jobs:
+  kani:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run Kani
+        uses: model-checking/kani-github-action@v1
+        with:
+          args: '--tests'
