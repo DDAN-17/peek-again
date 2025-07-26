@@ -1766,6 +1766,16 @@ impl<T: ExactSizeIterator> ExactSizeIterator for Peekable<T> {
 
 impl<T: FusedIterator> FusedIterator for Peekable<T> {}
 
+/// Extention trait that allows [`Peekable`] iterators to be created without using [`Peekable::new`].
+pub trait PeekableIterator: Iterator + Sized {
+    /// Creates a [`Peekable`] iterator using `self`.
+    fn peek_again(self) -> Peekable<Self> {
+        Peekable::new(self)
+    }
+}
+
+impl<I: Iterator + Sized> PeekableIterator for I {}
+
 #[cfg(test)]
 mod tests {
     extern crate alloc;
